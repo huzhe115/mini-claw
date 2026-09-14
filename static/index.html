@@ -39,6 +39,8 @@
   .msg.user { align-self: flex-end; background: #6c8cff; color: #fff; }
   .msg.assistant { align-self: flex-start; background: #fff; border: 1px solid #e3e5ea; }
   .msg.error { align-self: flex-start; background: #fdecea; border: 1px solid #f5c6c0; color: #b42318; }
+  .msg.cron { align-self: center; background: #fff8e1; border: 1px dashed #e6c56c;
+              color: #8a6d1a; font-size: 12px; padding: 6px 14px; }
   .msg .meta { display: block; font-size: 11px; color: #8b90a0; margin-top: 6px; }
   .assistant-box { align-self: flex-start; max-width: 72%; display: flex;
                    flex-direction: column; gap: 8px; }
@@ -121,10 +123,15 @@ function toolEl(name, input, output) {
   return d;
 }
 
-// 渲染一条展示消息:user 是纯文本,assistant 是步骤列表(文本步 + 工具步)
+// 渲染一条展示消息:user 是纯文本,assistant 是步骤列表(文本步 + 工具步),
+// cron 是报时员主动发起的任务,居中显示成小标签
 function renderMessage(m) {
   if (m.role === 'user') {
     messagesEl.append(msgEl(m.content, 'user'));
+    return;
+  }
+  if (m.role === 'cron') {
+    messagesEl.append(msgEl('⏰ 定时任务: ' + m.content, 'cron'));
     return;
   }
   const box = document.createElement('div');

@@ -7,7 +7,7 @@
 """
 from datetime import datetime
 
-from sqlalchemy import DateTime, ForeignKey, Integer, String, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column
 
@@ -33,5 +33,22 @@ class MessageModel(Base):
     role: Mapped[str] = mapped_column(String(20))
     payload: Mapped[dict] = mapped_column(JSONB)
     meta: Mapped[dict | None] = mapped_column(JSONB, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now())
+
+
+class CronJobModel(Base):
+    """排班表:什么时间、对哪个会话、发起什么任务。"""
+
+    __tablename__ = "cron_jobs"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_id: Mapped[str] = mapped_column(
+        ForeignKey("sessions.id", ondelete="CASCADE"), index=True)
+    prompt: Mapped[str] = mapped_column(Text)
+    schedule: Mapped[str] = mapped_column(String(100))  # cron 表达式,如 "0 8 * * *"
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+    last_run_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now())

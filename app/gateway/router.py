@@ -1,33 +1,34 @@
-"""网关路由 — 所有渠道的入口(Phase 2:WebChat + CLI)。
+"""网关路由 — 所有渠道的入口(Phase 3:WebChat + CLI + Cron)。
 
 接口:
   POST /api/sessions                          新建会话
   GET  /api/sessions                          会话列表
   GET  /api/sessions/{id}/messages            历史消息(展示格式)
   POST /api/sessions/{id}/chat/stream         发消息,SSE 流式返回
+  POST /api/cron                              建定时任务(排班表)
+  GET  /api/cron                              定时任务列表
+  DELETE /api/cron/{id}                       删定时任务
+  POST /api/cron/{id}/run                     立即触发一次(演示/联调用)
 
-Phase 2 落库:会话/消息存 PostgreSQL,重启不丢。
-每次 Agent 运行的模型、token 用量、耗时记进消息的 meta 字段。
-
-流式桥接:agent_loop 是同步代码,跑在线程池里;
+流式桥接:Agent 循环是同步代码,跑在线程池里;
 事件通过 asyncio.Queue 传回事件循环,再包成 SSE 帧推给前端。
 Queue.put_nowait 是线程安全的,所以 sink 回调不需要任何锁。
 """
 import asyncio
 import json
 import logging
-import time
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.agent.loop import SYSTEM, agent_loop
-from app.agent.memory import MEMORY, memory_section
-from app.config import settings
-from app.core.sessions import Session, store
+from app.core.cron import _fire_cron, parse_cron, schedule, unschedule
+from app.core.sessions import store
+from app.core.turn import run_turn
 from app.db import get_db
+from app.models import CronJobModel, SessionModel
 
 from .auth import require_gateway_token
 
@@ -45,31 +46,16 @@ class ChatIn(BaseModel):
     content: str = Field(min_length=1, max_length=10000)
 
 
-def _auto_title(session: Session, content: str) -> None:
-    """首条消息把默认标题换成话题标题(截断前 16 字,像 DeepSeek 侧栏)。"""
-    if session.title == "新会话":
-        flat = " ".join(content.split())
-        session.title = flat[:16] + ("…" if len(flat) > 16 else "")
+class CronIn(BaseModel):
+    session_id: str
+    prompt: str = Field(min_length=1, max_length=10000)
+    schedule: str = Field(min_length=1, max_length=100)
 
 
-def _run_agent_sync(messages: list, content: str, sink) -> Exception | None:
-    """跑在线程池里的同步 Agent。正常返回 None;异常先发 error 事件再返回异常对象。
-
-    进入主循环前先召回相关记忆拼进 system prompt(记事本查一遍再干活)。
-    结束哨兵 None 必须由本函数发出(无论成败)——消费端靠它知道"流结束了"。
-    """
-    try:
-        system = SYSTEM
-        if settings.memory_enabled:
-            recalled = MEMORY.load_relevant(content)
-            system = SYSTEM + memory_section(recalled)
-        agent_loop(messages, system=system, sink=sink)
-        return None
-    except Exception as e:
-        sink({"type": "error", "detail": str(e)})
-        return e
-    finally:
-        sink(None)
+def _job_dict(job: CronJobModel) -> dict:
+    return {"id": job.id, "session_id": job.session_id, "prompt": job.prompt,
+            "schedule": job.schedule, "enabled": job.enabled,
+            "last_run_at": job.last_run_at, "created_at": job.created_at}
 
 
 @router.post("/sessions", status_code=201)
@@ -106,84 +92,75 @@ async def chat_stream(session_id: str, body: ChatIn,
         raise HTTPException(status_code=409, detail="该会话正在处理上一条消息,请稍候")
 
     async with s.lock:
-        user_display = {"role": "user", "content": body.content}
-        await store.append_display(db, s, user_display)
-        _auto_title(s, body.content)
-        await store.save_title(db, s)
-        s.llm_messages.append({"role": "user", "content": body.content})
-        # 用户消息先落库:就算 Agent 中途出错,数据库也停在"用户消息已入账"的
-        # 干净状态,不会留下半截工具调用。出错时无需回滚——下次请求重新从库读。
-        await store.save_llm(db, s)
-
         queue: asyncio.Queue = asyncio.Queue()
 
         def sink(ev) -> None:
-            # 在 Agent 线程里被调用;put_nowait 线程安全,结束哨兵是 None
-            queue.put_nowait(ev)
+            # done 事件不外发(收尾帧由 event_gen 组装);None 哨兵必须转发,
+            # event_gen 靠它知道流结束了
+            if ev is None or ev["type"] != "done":
+                queue.put_nowait(ev)
 
         async def event_gen():
-            # 展示步骤在这里累积(只有本协程在消费队列,单线程无锁):
-            # delta 攒成 text 步,工具事件单独成步,结果挂回对应工具步
-            steps: list[dict] = []
-            cur = ""
-            usage = None
-            yield _sse({"type": "user_msg", "message": user_display})
-
-            loop = asyncio.get_running_loop()
-            started = time.perf_counter()
-            future = loop.run_in_executor(
-                None, _run_agent_sync, s.llm_messages, body.content, sink)
-
+            yield _sse({"type": "user_msg",
+                        "message": {"role": "user", "content": body.content}})
+            task = asyncio.create_task(run_turn(db, s, body.content, sink=sink))
             while True:
                 ev = await queue.get()
-                if ev is None:  # Agent 结束哨兵
+                if ev is None:
                     break
-                kind = ev["type"]
-                if kind == "delta":
-                    cur += ev["text"]
-                    yield _sse(ev)
-                elif kind == "tool":
-                    if cur:
-                        steps.append({"type": "text", "content": cur})
-                        cur = ""
-                    steps.append({"type": "tool", "name": ev["name"],
-                                  "input": ev["input"], "output": ""})
-                    yield _sse(ev)
-                elif kind == "tool_result":
-                    # 倒序找最近一个还没结果的工具步挂上去
-                    for st in reversed(steps):
-                        if st["type"] == "tool" and not st.get("output"):
-                            st["output"] = ev["output"]
-                            break
-                    yield _sse(ev)
-                elif kind == "done":
-                    usage = ev.get("usage")
-                elif kind == "error":
-                    yield _sse(ev)
-
-            err = await future
-            if err is not None:
-                return  # llm_messages 已在运行前落库,库里就是干净状态
-
-            if cur:
-                steps.append({"type": "text", "content": cur})
-            assistant_display = {"role": "assistant", "steps": steps}
-            # 每次调用留档:模型、token 用量、耗时(对齐项目 1 Playground 的要求)
-            meta = {
-                "model": settings.model_id,
-                "usage": usage,
-                "duration_ms": round((time.perf_counter() - started) * 1000),
-            }
-            await store.append_display(db, s, assistant_display, meta)
-            await store.save_llm(db, s)
-            yield _sse({"type": "done", "usage": usage,
-                        "message": assistant_display, "meta": meta})
-
-            # 回合结束后后台提取跨会话记忆:不阻塞流,提取失败只记日志
-            if settings.memory_enabled:
-                asyncio.get_running_loop().create_task(
-                    asyncio.to_thread(MEMORY.extract, list(s.llm_messages)))
+                yield _sse(ev)
+            result = await task
+            if result.get("error"):
+                return  # error 事件已经转发过了
+            yield _sse({"type": "done", "usage": result["usage"],
+                        "message": {"role": "assistant", "steps": result["steps"]},
+                        "meta": result["meta"]})
 
         # ponytail: 客户端中途断连时,Agent 线程会继续把任务跑完(结果照常进会话),
-        # 只是没人接收事件。个人项目可接受,Phase 3 上任务队列后统一治理。
+        # 只是没人接收事件。个人项目可接受,任务队列化时统一治理。
         return StreamingResponse(event_gen(), media_type="text/event-stream")
+
+
+# ---------- 排班表(cron) ----------
+
+@router.post("/cron", status_code=201)
+async def create_cron(body: CronIn, db: AsyncSession = Depends(get_db),
+                      _: str = Depends(require_gateway_token)):
+    if await db.get(SessionModel, body.session_id) is None:
+        raise HTTPException(status_code=404, detail="session not found")
+    try:
+        parse_cron(body.schedule)
+    except ValueError as e:
+        raise HTTPException(status_code=400, detail=f"bad cron expression: {e}")
+
+    job = CronJobModel(session_id=body.session_id, prompt=body.prompt,
+                       schedule=body.schedule)
+    db.add(job)
+    await db.commit()
+    await db.refresh(job)
+    schedule(job.id, body.schedule)  # 挂上报时员
+    return _job_dict(job)
+
+
+@router.get("/cron")
+async def list_cron(db: AsyncSession = Depends(get_db),
+                    _: str = Depends(require_gateway_token)):
+    jobs = (await db.scalars(select(CronJobModel).order_by(CronJobModel.id))).all()
+    return [_job_dict(j) for j in jobs]
+
+
+@router.delete("/cron/{job_id}", status_code=204)
+async def delete_cron(job_id: int, db: AsyncSession = Depends(get_db),
+                      _: str = Depends(require_gateway_token)):
+    job = await db.get(CronJobModel, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="cron job not found")
+    unschedule(job_id)
+    await db.delete(job)
+    await db.commit()
+
+
+@router.post("/cron/{job_id}/run")
+async def run_cron_now(job_id: int, _: str = Depends(require_gateway_token)):
+    """立即触发一次(演示/联调用),等价于报时员到点敲门。"""
+    return await _fire_cron(job_id)

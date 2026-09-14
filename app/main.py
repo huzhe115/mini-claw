@@ -1,3 +1,4 @@
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI
@@ -5,15 +6,26 @@ from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
 
 from app.config import settings
+from app.core.cron import init_scheduler, shutdown_scheduler
 from app.gateway import router as gateway_router
 
 # Agent 的工作目录,启动时确保存在
 Path(settings.workspace_dir).mkdir(parents=True, exist_ok=True)
 
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    # 报时员随服务一起上班下班,排班表从库里恢复
+    await init_scheduler()
+    yield
+    shutdown_scheduler()
+
+
 app = FastAPI(
     title="Mini-Claw",
-    version="0.1.0",
+    version="0.3.0",
     description="从 0 到 1 复刻 OpenClaw — 常驻私人 AI 助手",
+    lifespan=lifespan,
 )
 app.include_router(gateway_router.router)
 
