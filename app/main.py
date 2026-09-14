@@ -11,9 +11,9 @@ from app.gateway import router as gateway_router
 Path(settings.workspace_dir).mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(
-    title="OpenClaw",
+    title="Mini-Claw",
     version="0.1.0",
-    description="从 0 到 1 写一个 OpenClaw — 常驻私人 AI 助手",
+    description="从 0 到 1 复刻 OpenClaw — 常驻私人 AI 助手",
 )
 app.include_router(gateway_router.router)
 

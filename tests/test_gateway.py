@@ -34,4 +34,4 @@ async def test_messages_404(client, auth_headers):
 async def test_index_page(client):
     resp = await client.get("/")
     assert resp.status_code == 200
-    assert "OpenClaw" in resp.text
+    assert "Mini-Claw" in resp.text

@@ -1,9 +1,9 @@
-# OpenClaw — 从 0 到 1 写一个常驻私人 AI 助手
+# Mini-Claw — 从 0 到 1 复刻 OpenClaw 的常驻私人 AI 助手
 
 比特鹰成长计划 · 综合实战。参考原版 [nanoclaw.dev](https://nanoclaw.dev/)(TypeScript)的**架构思想**,
 用 Python 复刻:Agent 大脑来自项目 3(mini-claude),后端工程套路来自项目 4(ai-chat-backend)。
 
-技术设计文档:桌面 `OpenClaw技术文档.md`。
+技术设计文档:桌面 `Mini-Claw技术文档.md`。
 
 ## 架构(Phase 1)
 
