@@ -1,0 +1,289 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>OpenClaw</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+         display: flex; height: 100vh; background: #f5f6f8; color: #1f2328; }
+
+  /* ---- 侧栏 ---- */
+  aside { width: 260px; background: #1e1e2e; color: #cfd3dc; display: flex;
+          flex-direction: column; flex-shrink: 0; }
+  .brand { padding: 18px 16px 10px; font-size: 20px; font-weight: 700; color: #fff; }
+  .brand small { display: block; font-size: 11px; font-weight: 400; color: #8b90a0; margin-top: 2px; }
+  #new-session { margin: 8px 12px; padding: 9px; border: 1px solid #3a3f52; border-radius: 8px;
+                 background: #2a2e42; color: #fff; cursor: pointer; font-size: 14px; }
+  #new-session:hover { background: #353a52; }
+  #sessions { list-style: none; overflow-y: auto; flex: 1; }
+  #sessions li { padding: 10px 16px; cursor: pointer; font-size: 13px;
+                 white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+                 border-left: 3px solid transparent; }
+  #sessions li:hover { background: #2a2e42; }
+  #sessions li.active { background: #2a2e42; border-left-color: #6c8cff; color: #fff; }
+  .token-box { padding: 12px; border-top: 1px solid #3a3f52; font-size: 12px; }
+  .token-box input { width: 100%; padding: 7px 8px; border: 1px solid #3a3f52; border-radius: 6px;
+                     background: #14151f; color: #cfd3dc; font-size: 12px; margin-bottom: 6px; }
+  .token-box button { width: 100%; padding: 6px; border: none; border-radius: 6px;
+                      background: #6c8cff; color: #fff; cursor: pointer; font-size: 12px; }
+  .token-box .hint { color: #8b90a0; margin-bottom: 6px; }
+
+  /* ---- 聊天区 ---- */
+  main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+  #messages { flex: 1; overflow-y: auto; padding: 24px; display: flex;
+              flex-direction: column; gap: 12px; }
+  .msg { max-width: 72%; padding: 10px 14px; border-radius: 12px; font-size: 14px;
+         line-height: 1.6; white-space: pre-wrap; word-break: break-word; }
+  .msg.user { align-self: flex-end; background: #6c8cff; color: #fff; }
+  .msg.assistant { align-self: flex-start; background: #fff; border: 1px solid #e3e5ea; }
+  .msg.error { align-self: flex-start; background: #fdecea; border: 1px solid #f5c6c0; color: #b42318; }
+  .msg .meta { display: block; font-size: 11px; color: #8b90a0; margin-top: 6px; }
+  .assistant-box { align-self: flex-start; max-width: 72%; display: flex;
+                   flex-direction: column; gap: 8px; }
+  .assistant-box .msg { max-width: 100%; }
+  details.tool { background: #eef0f5; border: 1px solid #dfe2ea; border-radius: 8px;
+                 padding: 6px 10px; font-size: 12px; color: #444b57; }
+  details.tool summary { cursor: pointer; font-family: ui-monospace, Consolas, monospace;
+                         color: #57606a; }
+  details.tool pre { margin-top: 6px; white-space: pre-wrap; word-break: break-all;
+                     max-height: 200px; overflow-y: auto; font-family: ui-monospace, Consolas, monospace; }
+
+  form { display: flex; gap: 10px; padding: 14px 20px; border-top: 1px solid #e3e5ea;
+         background: #fff; }
+  textarea { flex: 1; resize: none; height: 52px; padding: 12px; border: 1px solid #d4d8e0;
+             border-radius: 10px; font-size: 14px; font-family: inherit; outline: none; }
+  textarea:focus { border-color: #6c8cff; }
+  button#send { width: 88px; border: none; border-radius: 10px; background: #6c8cff;
+                color: #fff; font-size: 14px; cursor: pointer; }
+  button#send:disabled { background: #b9c2f5; cursor: not-allowed; }
+</style>
+</head>
+<body>
+<aside>
+  <div class="brand">🦞 OpenClaw<small>常驻私人 AI 助手 · Phase 1</small></div>
+  <button id="new-session">＋ 新会话</button>
+  <ul id="sessions"></ul>
+  <div class="token-box">
+    <div class="hint">Gateway Token(存在浏览器本地)</div>
+    <input id="token" type="password" placeholder="X-Gateway-Token">
+    <button id="save-token">保存 Token</button>
+  </div>
+</aside>
+<main>
+  <div id="messages"></div>
+  <form id="composer">
+    <textarea id="input" placeholder="发消息给 OpenClaw…(Enter 发送,Shift+Enter 换行)"></textarea>
+    <button id="send" type="submit">发送</button>
+  </form>
+</main>
+
+<script>
+const TOKEN_KEY = 'openclaw_token';
+let token = localStorage.getItem(TOKEN_KEY) || '';
+let currentSession = null;
+let streaming = false;
+
+const $ = (sel) => document.querySelector(sel);
+const messagesEl = $('#messages');
+
+function scrollBottom() { messagesEl.scrollTop = messagesEl.scrollHeight; }
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, {
+    ...opts,
+    headers: { 'X-Gateway-Token': token, ...(opts.headers || {}) },
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || `HTTP ${res.status}`);
+  }
+  return res;
+}
+
+function msgEl(text, cls) {
+  const div = document.createElement('div');
+  div.className = `msg ${cls}`;
+  div.textContent = text;
+  return div;
+}
+
+function toolEl(name, input, output) {
+  const d = document.createElement('details');
+  d.className = 'tool';
+  d.open = false;
+  const sum = document.createElement('summary');
+  sum.textContent = `🔧 ${name}(${JSON.stringify(input)})`;
+  const pre = document.createElement('pre');
+  pre.textContent = output || '…';
+  d.append(sum, pre);
+  return d;
+}
+
+// 渲染一条展示消息:user 是纯文本,assistant 是步骤列表(文本步 + 工具步)
+function renderMessage(m) {
+  if (m.role === 'user') {
+    messagesEl.append(msgEl(m.content, 'user'));
+    return;
+  }
+  const box = document.createElement('div');
+  box.className = 'assistant-box';
+  for (const st of (m.steps || [])) {
+    if (st.type === 'text') box.append(msgEl(st.content, 'assistant'));
+    else box.append(toolEl(st.name, st.input, st.output));
+  }
+  messagesEl.append(box);
+}
+
+function renderHistory(history) {
+  messagesEl.innerHTML = '';
+  for (const m of history) renderMessage(m);
+  scrollBottom();
+}
+
+async function loadSessions(selectId) {
+  const res = await api('/api/sessions');
+  const list = await res.json();
+  const ul = $('#sessions');
+  ul.innerHTML = '';
+  for (const s of list) {
+    const li = document.createElement('li');
+    li.textContent = s.title;
+    li.dataset.id = s.id;
+    if (s.id === (selectId || currentSession?.id)) li.classList.add('active');
+    li.onclick = () => selectSession(s.id);
+    ul.append(li);
+  }
+}
+
+async function selectSession(id) {
+  currentSession = id;
+  await loadSessions();
+  const res = await api(`/api/sessions/${id}/messages`);
+  renderHistory(await res.json());
+}
+
+async function newSession() {
+  const res = await api('/api/sessions', { method: 'POST' });
+  const s = await res.json();
+  await loadSessions(s.id);
+  await selectSession(s.id);
+}
+
+// ---- SSE:fetch 读响应流,按 "\n\n" 切帧解析 data: 行 ----
+function handleEvent(ev, live) {
+  if (ev.type === 'user_msg') {
+    messagesEl.append(msgEl(ev.message.content, 'user'));
+  } else if (ev.type === 'delta') {
+    if (!live.box) {
+      live.box = document.createElement('div');
+      live.box.className = 'assistant-box';
+      messagesEl.append(live.box);
+    }
+    if (!live.textEl) {
+      live.textEl = msgEl('', 'assistant');
+      live.box.append(live.textEl);
+    }
+    live.textEl.textContent += ev.text;  // 打字机
+  } else if (ev.type === 'tool') {
+    if (!live.box) { live.box = document.createElement('div'); live.box.className = 'assistant-box'; messagesEl.append(live.box); }
+    live.toolEl = toolEl(ev.name, ev.input, '');
+    live.box.append(live.toolEl);
+    live.textEl = null;  // 工具之后的新文本开新气泡
+  } else if (ev.type === 'tool_result') {
+    if (live.toolEl) live.toolEl.querySelector('pre').textContent = ev.output;
+  } else if (ev.type === 'done') {
+    const meta = document.createElement('span');
+    meta.className = 'meta';
+    if (ev.usage) meta.textContent = `tokens: ${ev.usage.input_tokens} in / ${ev.usage.output_tokens} out`;
+    (live.textEl || live.box)?.append(meta);
+  } else if (ev.type === 'error') {
+    messagesEl.append(msgEl('出错了: ' + ev.detail, 'error'));
+  }
+  scrollBottom();
+}
+
+async function sendMessage(text) {
+  const res = await api(`/api/sessions/${currentSession.id}/chat/stream`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ content: text }),
+  });
+  if (!res.ok) {
+    const data = await res.json().catch(() => ({}));
+    throw new Error(data.detail || `HTTP ${res.status}`);
+  }
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buf = '';
+  const live = { box: null, textEl: null, toolEl: null };
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buf += decoder.decode(value, { stream: true });
+    let idx;
+    while ((idx = buf.indexOf('\n\n')) !== -1) {
+      const frame = buf.slice(0, idx);
+      buf = buf.slice(idx + 2);
+      for (const line of frame.split('\n')) {
+        if (!line.startsWith('data: ')) continue;
+        handleEvent(JSON.parse(line.slice(6)), live);
+      }
+    }
+  }
+}
+
+// ---- 事件绑定 ----
+$('#composer').addEventListener('submit', async (e) => {
+  e.preventDefault();
+  const input = $('#input');
+  const text = input.value.trim();
+  if (!text || !currentSession || streaming) return;
+  streaming = true;
+  $('#send').disabled = true;
+  input.value = '';
+  try {
+    await sendMessage(text);
+    await loadSessions();  // 标题可能已更新
+  } catch (err) {
+    if (err.message.includes('处理上一条')) alert('该会话正在处理上一条消息,请稍候再发');
+    else messagesEl.append(msgEl('出错了: ' + err.message, 'error'));
+  } finally {
+    streaming = false;
+    $('#send').disabled = false;
+    scrollBottom();
+  }
+});
+
+$('#input').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    $('#composer').requestSubmit();
+  }
+});
+
+$('#new-session').onclick = newSession;
+$('#save-token').onclick = () => {
+  token = $('#token').value.trim();
+  localStorage.setItem(TOKEN_KEY, token);
+  $('#token').value = '';
+  loadSessions().catch((err) => alert('Token 不对: ' + err.message));
+};
+$('#token').value = token;
+
+// ---- 启动 ----
+(async () => {
+  if (!token) { alert('先在左下角填写 Gateway Token(见 .env 的 GATEWAY_TOKEN)'); return; }
+  try {
+    await loadSessions();
+    const res = await api('/api/sessions');
+    const list = await res.json();
+    if (list.length) await selectSession(list[0].id);
+  } catch (err) {
+    messagesEl.append(msgEl('连不上网关: ' + err.message, 'error'));
+  }
+})();
+</script>
+</body>
+</html>
