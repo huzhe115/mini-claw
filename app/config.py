@@ -17,5 +17,8 @@ class Settings(BaseSettings):
     workspace_dir: str = "workspace"  # Agent 工具的活动范围,文件操作只允许在这之内
     max_steps: int = 15               # Agent 单次任务最多跑几轮,防死循环
 
+    memory_dir: str = ""              # 记忆目录;空 = ~/.mini-claw/memory(和原版 OpenClaw 一致)
+    memory_enabled: bool = True       # 测试里关掉,避免背景提取消耗假 LLM 脚本
+
 
 settings = Settings()

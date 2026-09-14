@@ -33,5 +33,14 @@ class LLM:
             max_tokens=8000,
         )
 
+    def complete(self, messages: list, system: str, max_tokens: int = 1500):
+        """非流式补全。记忆召回/提取这类"要 JSON 不要打字机"的内部调用用它。"""
+        return self.client.messages.create(
+            model=settings.model_id,
+            system=system,
+            messages=messages,
+            max_tokens=max_tokens,
+        )
+
 
 llm = LLM()

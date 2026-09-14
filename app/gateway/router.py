@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.loop import SYSTEM, agent_loop
+from app.agent.memory import MEMORY, memory_section
 from app.config import settings
 from app.core.sessions import Session, store
 from app.db import get_db
@@ -51,13 +52,18 @@ def _auto_title(session: Session, content: str) -> None:
         session.title = flat[:16] + ("…" if len(flat) > 16 else "")
 
 
-def _run_agent_sync(messages: list, sink) -> Exception | None:
+def _run_agent_sync(messages: list, content: str, sink) -> Exception | None:
     """跑在线程池里的同步 Agent。正常返回 None;异常先发 error 事件再返回异常对象。
 
+    进入主循环前先召回相关记忆拼进 system prompt(记事本查一遍再干活)。
     结束哨兵 None 必须由本函数发出(无论成败)——消费端靠它知道"流结束了"。
     """
     try:
-        agent_loop(messages, system=SYSTEM, sink=sink)
+        system = SYSTEM
+        if settings.memory_enabled:
+            recalled = MEMORY.load_relevant(content)
+            system = SYSTEM + memory_section(recalled)
+        agent_loop(messages, system=system, sink=sink)
         return None
     except Exception as e:
         sink({"type": "error", "detail": str(e)})
@@ -125,7 +131,8 @@ async def chat_stream(session_id: str, body: ChatIn,
 
             loop = asyncio.get_running_loop()
             started = time.perf_counter()
-            future = loop.run_in_executor(None, _run_agent_sync, s.llm_messages, sink)
+            future = loop.run_in_executor(
+                None, _run_agent_sync, s.llm_messages, body.content, sink)
 
             while True:
                 ev = await queue.get()
@@ -171,6 +178,11 @@ async def chat_stream(session_id: str, body: ChatIn,
             await store.save_llm(db, s)
             yield _sse({"type": "done", "usage": usage,
                         "message": assistant_display, "meta": meta})
+
+            # 回合结束后后台提取跨会话记忆:不阻塞流,提取失败只记日志
+            if settings.memory_enabled:
+                asyncio.get_running_loop().create_task(
+                    asyncio.to_thread(MEMORY.extract, list(s.llm_messages)))
 
         # ponytail: 客户端中途断连时,Agent 线程会继续把任务跑完(结果照常进会话),
         # 只是没人接收事件。个人项目可接受,Phase 3 上任务队列后统一治理。

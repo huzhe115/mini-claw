@@ -7,6 +7,9 @@ os.environ["ANTHROPIC_API_KEY"] = ""
 os.environ["GATEWAY_TOKEN"] = "test-token"
 os.environ["WORKSPACE_DIR"] = tempfile.mkdtemp(prefix="mini-claw-test-ws-")
 os.environ["DATABASE_URL"] = "postgresql+asyncpg://postgres:123456@localhost:5432/mini_claw_test"
+# 记忆:测试里关掉(否则背景提取会消耗假 LLM 脚本),目录指向临时位置
+os.environ["MEMORY_ENABLED"] = "false"
+os.environ["MEMORY_DIR"] = tempfile.mkdtemp(prefix="mini-claw-test-mem-")
 
 import asyncpg
 import pytest_asyncio
