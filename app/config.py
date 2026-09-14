@@ -20,5 +20,8 @@ class Settings(BaseSettings):
     memory_dir: str = ""              # 记忆目录;空 = ~/.mini-claw/memory(和原版 OpenClaw 一致)
     memory_enabled: bool = True       # 测试里关掉,避免背景提取消耗假 LLM 脚本
 
+    redis_url: str = "redis://localhost:6379/0"
+    rate_limit_per_minute: int = 30   # 每个 token 每分钟最多发多少条;<=0 关闭限流
+
 
 settings = Settings()

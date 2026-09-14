@@ -20,6 +20,7 @@ dependencies = [
     "alembic>=1.13",
     "httpx>=0.27",
     "apscheduler>=3.10",
+    "redis>=5.0",
 ]
 
 [project.optional-dependencies]

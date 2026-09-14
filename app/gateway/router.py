@@ -29,6 +29,7 @@ from app.core.sessions import store
 from app.core.turn import run_turn
 from app.db import get_db
 from app.models import CronJobModel, SessionModel
+from app.rate_limit import check_rate_limit
 
 from .auth import require_gateway_token
 
@@ -84,7 +85,9 @@ async def list_messages(session_id: str, db: AsyncSession = Depends(get_db),
 @router.post("/sessions/{session_id}/chat/stream")
 async def chat_stream(session_id: str, body: ChatIn,
                       db: AsyncSession = Depends(get_db),
-                      _: str = Depends(require_gateway_token)):
+                      token: str = Depends(require_gateway_token)):
+    if not await check_rate_limit(token):
+        raise HTTPException(status_code=429, detail="请求太频繁,休息一分钟")
     s = await store.get(db, session_id)
     if s is None:
         raise HTTPException(status_code=404, detail="session not found")

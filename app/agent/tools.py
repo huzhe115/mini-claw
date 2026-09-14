@@ -8,6 +8,7 @@
 加一个工具 = 这里加三样东西,主循环一行不用改。
 """
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -145,11 +146,12 @@ def run_grep(pattern: str, glob_pattern: str = "**/*") -> str:
 
 # ---------- bash ----------
 # Windows 坑(来自 mini-claude):cmd 输出可能是 GBK,命令前先 chcp 65001 切 UTF-8,
-# 解码失败再回退 GBK,不要用 text=True 让 locale 猜——会乱码
+# 解码失败再回退 GBK,不要用 text=True 让 locale 猜——会乱码。
+# chcp 只在 Windows 注入,Linux(CI/容器)没有这个命令。
 
 
 def _decode_output(data: bytes) -> str:
-    """统一按 UTF-8 解码(命令前已 chcp 65001),失败回退 GBK 兜底。"""
+    """统一按 UTF-8 解码(Windows 下命令前已 chcp 65001),失败回退 GBK 兜底。"""
     try:
         return data.decode("utf-8")
     except UnicodeDecodeError:
@@ -161,8 +163,9 @@ def _decode_output(data: bytes) -> str:
 
 def run_bash(command: str, timeout: int = 120) -> str:
     try:
+        prefix = "chcp 65001 >nul & " if os.name == "nt" else ""
         # check=False:命令失败不抛异常,退出码由 returncode 带回,拼进结果返回
-        r = subprocess.run(f"chcp 65001 >nul & {command}", shell=True, cwd=WORKDIR,
+        r = subprocess.run(prefix + command, shell=True, cwd=WORKDIR,
                            capture_output=True, timeout=timeout, check=False)
         out = (_decode_output(r.stdout) + _decode_output(r.stderr)).strip()
         result = out[:MAX_TOOL_OUTPUT] if out else "(no output)"

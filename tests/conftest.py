@@ -10,6 +10,8 @@ os.environ["DATABASE_URL"] = "postgresql+asyncpg://postgres:123456@localhost:543
 # 记忆:测试里关掉(否则背景提取会消耗假 LLM 脚本),目录指向临时位置
 os.environ["MEMORY_ENABLED"] = "false"
 os.environ["MEMORY_DIR"] = tempfile.mkdtemp(prefix="mini-claw-test-mem-")
+# 限流:测试里关掉(本机没有 Redis,每次连被拒端口很慢;限流逻辑由专门测试覆盖)
+os.environ["RATE_LIMIT_PER_MINUTE"] = "0"
 
 import asyncpg
 import pytest_asyncio
