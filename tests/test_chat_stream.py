@@ -59,7 +59,7 @@ async def test_plain_reply(client, auth_headers, fake_llm):
     assert len(resp.json()) == 2  # user + assistant
 
 
-async def test_tool_call_flow(client, auth_headers, fake_llm):
+async def test_tool_call_flow(client, auth_headers, fake_llm, db_session):
     """模型调 bash 工具:tool/tool_result 事件、展示步骤、消息回填都要对。"""
     fake_llm.script.append({
         "chunks": [],
@@ -89,13 +89,13 @@ async def test_tool_call_flow(client, auth_headers, fake_llm):
     assert steps[1] == {"type": "text", "content": "执行完毕"}
 
     # 喂给模型的原始消息里,工具结果用 tool_use_id 回填
-    session = await store.get(sid)
+    session = await store.get(db_session, sid)
     tool_result_msg = session.llm_messages[-2]  # 倒二条是 tool_result 回填
     assert tool_result_msg["role"] == "user"
     assert tool_result_msg["content"][0]["tool_use_id"] == "toolu_1"
 
 
-async def test_error_rollback(client, auth_headers, fake_llm):
+async def test_error_rollback(client, auth_headers, fake_llm, db_session):
     """LLM 中途报错:前端收到 error 事件,会话消息回滚到发送前。"""
     fake_llm.script.append({
         "chunks": [],
@@ -110,15 +110,16 @@ async def test_error_rollback(client, auth_headers, fake_llm):
     assert events[-1]["type"] == "error"
     assert "boom" in events[-1]["detail"]
 
-    session = await store.get(sid)
-    assert session.llm_messages == [{"role": "user", "content": "会出错吗"}]  # 已回滚
+    session = await store.get(db_session, sid)
+    # 用户消息在运行前已落库,Agent 报错后库里就是干净状态(没有半截工具调用)
+    assert session.llm_messages == [{"role": "user", "content": "会出错吗"}]
     assert len(session.display) == 1  # 只有用户消息,没有半截助手消息
 
 
-async def test_busy_session_409(client, auth_headers):
+async def test_busy_session_409(client, auth_headers, db_session):
     """同一会话同时只处理一条消息:锁被占时返回 409。"""
     sid = await _new_session(client, auth_headers)
-    session = await store.get(sid)
+    session = await store.get(db_session, sid)
     await session.lock.acquire()
 
     resp = await client.post(f"/api/sessions/{sid}/chat/stream",

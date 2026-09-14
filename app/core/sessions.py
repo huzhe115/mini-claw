@@ -1,46 +1,103 @@
-"""会话存储 — Phase 1 内存版。
+"""会话存储 — Phase 2 PostgreSQL 版。
 
-会话 = 一条对话线(对应原版 OpenClaw 的 dmScope=per-channel-peer)。
-每个 Session 存两份数据:
-- llm_messages: 喂给模型的原始消息(Anthropic 格式,含 tool_use/tool_result 块)
-- display:      给前端看的展示消息(步骤列表:文本 + 工具调用轨迹)
-两者各存各的互不翻译,省得展示层和模型层耦合。
+Phase 1 是内存 dict,重启即失;Phase 2 落库:
+- sessions 表:会话本体 + llm_messages(喂给模型的原始消息,JSONB)
+- messages 表:展示消息(user 纯文本 / assistant 步骤列表,JSONB)
+两份数据各存各的互不翻译——Phase 1 的原则延续。
 
-Phase 2 落 PostgreSQL,对外接口保持不变。
+对外接口和 Phase 1 相同:store.create/get/list + Session 对象。
+一个注意点:get 每次从库里新造 Session 对象,所以会话锁必须放在
+进程级注册表里按 id 共享,否则两个并发请求各拿各的锁,锁就失效了。
 """
 import asyncio
-import time
+import json
 import uuid
+
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.models import MessageModel, SessionModel
+
+
+def _dump(obj):
+    """把 anthropic SDK 的内容块(pydantic 对象)转成可 JSON 化的 dict。"""
+    if hasattr(obj, "model_dump"):
+        return obj.model_dump()
+    return str(obj)
+
+
+def _dump_llm_messages(messages: list) -> list:
+    """llm_messages 里混着 SDK 块对象和普通 dict,先整体归一成纯 dict 再入库。"""
+    return json.loads(json.dumps(messages, default=_dump, ensure_ascii=False))
+
+
+# 会话锁注册表:id → asyncio.Lock。单进程网关够用,多进程部署时换分布式锁
+_locks: dict[str, asyncio.Lock] = {}
+
+
+def session_lock(session_id: str) -> asyncio.Lock:
+    lock = _locks.get(session_id)
+    if lock is None:
+        lock = _locks[session_id] = asyncio.Lock()
+    return lock
 
 
 class Session:
-    def __init__(self):
-        self.id = uuid.uuid4().hex[:12]
-        self.created_at = time.time()
-        self.title = "新会话"
-        self.llm_messages: list[dict] = []
-        self.display: list[dict] = []
-        self.lock = asyncio.Lock()  # 同一会话同一时间只处理一条消息
+    def __init__(self, id: str, title: str, created_at, llm_messages: list, display: list):
+        self.id = id
+        self.title = title
+        self.created_at = created_at
+        self.llm_messages = llm_messages
+        self.display = display
+
+    @property
+    def lock(self) -> asyncio.Lock:
+        return session_lock(self.id)
 
 
 class SessionStore:
-    def __init__(self):
-        self._sessions: dict[str, Session] = {}
-        self._guard = asyncio.Lock()  # 保护字典本身的并发读写
+    async def create(self, db: AsyncSession) -> Session:
+        row = SessionModel(id=uuid.uuid4().hex[:12])
+        db.add(row)
+        await db.commit()
+        await db.refresh(row)  # 拿数据库生成的 created_at
+        return Session(row.id, row.title, row.created_at, [], [])
 
-    async def create(self) -> Session:
-        s = Session()
-        async with self._guard:
-            self._sessions[s.id] = s
-        return s
+    async def get(self, db: AsyncSession, session_id: str) -> Session | None:
+        row = await db.get(SessionModel, session_id)
+        if row is None:
+            return None
+        messages = (await db.scalars(
+            select(MessageModel)
+            .where(MessageModel.session_id == session_id)
+            .order_by(MessageModel.id)
+        )).all()
+        return Session(row.id, row.title, row.created_at,
+                       row.llm_messages or [], [m.payload for m in messages])
 
-    async def get(self, session_id: str) -> Session | None:
-        async with self._guard:
-            return self._sessions.get(session_id)
+    async def list(self, db: AsyncSession) -> list[Session]:
+        rows = (await db.scalars(
+            select(SessionModel).order_by(SessionModel.created_at.desc())
+        )).all()
+        # 列表页只要头部信息,不加载消息
+        return [Session(r.id, r.title, r.created_at, [], []) for r in rows]
 
-    async def list(self) -> list[Session]:
-        async with self._guard:
-            return sorted(self._sessions.values(), key=lambda s: s.created_at, reverse=True)
+    async def save_title(self, db: AsyncSession, s: Session) -> None:
+        row = await db.get(SessionModel, s.id)
+        row.title = s.title
+        await db.commit()
+
+    async def append_display(self, db: AsyncSession, s: Session,
+                             entry: dict, meta: dict | None = None) -> None:
+        db.add(MessageModel(session_id=s.id, role=entry["role"],
+                            payload=entry, meta=meta))
+        await db.commit()
+        s.display.append(entry)
+
+    async def save_llm(self, db: AsyncSession, s: Session) -> None:
+        row = await db.get(SessionModel, s.id)
+        row.llm_messages = _dump_llm_messages(s.llm_messages)
+        await db.commit()
 
 
 store = SessionStore()

@@ -10,6 +10,8 @@ class Settings(BaseSettings):
     anthropic_base_url: str = "https://api.deepseek.com/anthropic"
     model_id: str = "deepseek-chat"
 
+    database_url: str = "postgresql+asyncpg://postgres:postgres@localhost:5432/mini_claw"
+
     gateway_token: str = "dev-token"  # 网关认证 token,上线前必须改
 
     workspace_dir: str = "workspace"  # Agent 工具的活动范围,文件操作只允许在这之内

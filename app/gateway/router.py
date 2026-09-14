@@ -1,4 +1,4 @@
-"""网关路由 — 所有渠道的入口(Phase 1 只有 WebChat)。
+"""网关路由 — 所有渠道的入口(Phase 2:WebChat + CLI)。
 
 接口:
   POST /api/sessions                          新建会话
@@ -6,20 +6,27 @@
   GET  /api/sessions/{id}/messages            历史消息(展示格式)
   POST /api/sessions/{id}/chat/stream         发消息,SSE 流式返回
 
-流式桥接(本文件的重点):agent_loop 是同步代码,跑在线程池里;
+Phase 2 落库:会话/消息存 PostgreSQL,重启不丢。
+每次 Agent 运行的模型、token 用量、耗时记进消息的 meta 字段。
+
+流式桥接:agent_loop 是同步代码,跑在线程池里;
 事件通过 asyncio.Queue 传回事件循环,再包成 SSE 帧推给前端。
 Queue.put_nowait 是线程安全的,所以 sink 回调不需要任何锁。
 """
 import asyncio
 import json
 import logging
+import time
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
+from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.agent.loop import SYSTEM, agent_loop
+from app.config import settings
 from app.core.sessions import Session, store
+from app.db import get_db
 
 from .auth import require_gateway_token
 
@@ -60,20 +67,23 @@ def _run_agent_sync(messages: list, sink) -> Exception | None:
 
 
 @router.post("/sessions", status_code=201)
-async def create_session(_: str = Depends(require_gateway_token)):
-    s = await store.create()
+async def create_session(db: AsyncSession = Depends(get_db),
+                         _: str = Depends(require_gateway_token)):
+    s = await store.create(db)
     return {"id": s.id, "title": s.title, "created_at": s.created_at}
 
 
 @router.get("/sessions")
-async def list_sessions(_: str = Depends(require_gateway_token)):
+async def list_sessions(db: AsyncSession = Depends(get_db),
+                        _: str = Depends(require_gateway_token)):
     return [{"id": s.id, "title": s.title, "created_at": s.created_at}
-            for s in await store.list()]
+            for s in await store.list(db)]
 
 
 @router.get("/sessions/{session_id}/messages")
-async def list_messages(session_id: str, _: str = Depends(require_gateway_token)):
-    s = await store.get(session_id)
+async def list_messages(session_id: str, db: AsyncSession = Depends(get_db),
+                        _: str = Depends(require_gateway_token)):
+    s = await store.get(db, session_id)
     if s is None:
         raise HTTPException(status_code=404, detail="session not found")
     return s.display
@@ -81,8 +91,9 @@ async def list_messages(session_id: str, _: str = Depends(require_gateway_token)
 
 @router.post("/sessions/{session_id}/chat/stream")
 async def chat_stream(session_id: str, body: ChatIn,
+                      db: AsyncSession = Depends(get_db),
                       _: str = Depends(require_gateway_token)):
-    s = await store.get(session_id)
+    s = await store.get(db, session_id)
     if s is None:
         raise HTTPException(status_code=404, detail="session not found")
     if s.lock.locked():
@@ -90,9 +101,13 @@ async def chat_stream(session_id: str, body: ChatIn,
 
     async with s.lock:
         user_display = {"role": "user", "content": body.content}
-        s.display.append(user_display)
+        await store.append_display(db, s, user_display)
         _auto_title(s, body.content)
+        await store.save_title(db, s)
         s.llm_messages.append({"role": "user", "content": body.content})
+        # 用户消息先落库:就算 Agent 中途出错,数据库也停在"用户消息已入账"的
+        # 干净状态,不会留下半截工具调用。出错时无需回滚——下次请求重新从库读。
+        await store.save_llm(db, s)
 
         queue: asyncio.Queue = asyncio.Queue()
 
@@ -108,8 +123,8 @@ async def chat_stream(session_id: str, body: ChatIn,
             usage = None
             yield _sse({"type": "user_msg", "message": user_display})
 
-            snapshot = s.llm_messages[:]  # 出错时回滚,不留半截工具调用
             loop = asyncio.get_running_loop()
+            started = time.perf_counter()
             future = loop.run_in_executor(None, _run_agent_sync, s.llm_messages, sink)
 
             while True:
@@ -141,14 +156,21 @@ async def chat_stream(session_id: str, body: ChatIn,
 
             err = await future
             if err is not None:
-                s.llm_messages[:] = snapshot  # 回滚到本次运行前
-                return
+                return  # llm_messages 已在运行前落库,库里就是干净状态
 
             if cur:
                 steps.append({"type": "text", "content": cur})
             assistant_display = {"role": "assistant", "steps": steps}
-            s.display.append(assistant_display)
-            yield _sse({"type": "done", "usage": usage, "message": assistant_display})
+            # 每次调用留档:模型、token 用量、耗时(对齐项目 1 Playground 的要求)
+            meta = {
+                "model": settings.model_id,
+                "usage": usage,
+                "duration_ms": round((time.perf_counter() - started) * 1000),
+            }
+            await store.append_display(db, s, assistant_display, meta)
+            await store.save_llm(db, s)
+            yield _sse({"type": "done", "usage": usage,
+                        "message": assistant_display, "meta": meta})
 
         # ponytail: 客户端中途断连时,Agent 线程会继续把任务跑完(结果照常进会话),
         # 只是没人接收事件。个人项目可接受,Phase 3 上任务队列后统一治理。
