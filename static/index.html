@@ -74,13 +74,13 @@
 <main>
   <div id="messages"></div>
   <form id="composer">
-    <textarea id="input" placeholder="发消息给 OpenClaw…(Enter 发送,Shift+Enter 换行)"></textarea>
+    <textarea id="input" placeholder="发消息给 Mini-Claw…(Enter 发送,Shift+Enter 换行)"></textarea>
     <button id="send" type="submit">发送</button>
   </form>
 </main>
 
 <script>
-const TOKEN_KEY = 'openclaw_token';
+const TOKEN_KEY = 'mini_claw_token';
 let token = localStorage.getItem(TOKEN_KEY) || '';
 let currentSession = null;
 let streaming = false;

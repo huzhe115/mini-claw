@@ -9,8 +9,8 @@ def test_path_escape_blocked():
 
 
 def test_write_read_roundtrip():
-    assert "Wrote" in run_write("hello.txt", "hi openclaw")
-    assert run_read("hello.txt") == "hi openclaw"
+    assert "Wrote" in run_write("hello.txt", "hi mini-claw")
+    assert run_read("hello.txt") == "hi mini-claw"
 
 
 def test_bash_echo():

@@ -5,7 +5,7 @@ import tempfile
 # 空 API key 保证任何漏网的代码都不会真调外部 LLM
 os.environ["ANTHROPIC_API_KEY"] = ""
 os.environ["GATEWAY_TOKEN"] = "test-token"
-os.environ["WORKSPACE_DIR"] = tempfile.mkdtemp(prefix="openclaw-test-ws-")
+os.environ["WORKSPACE_DIR"] = tempfile.mkdtemp(prefix="mini-claw-test-ws-")
 
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
