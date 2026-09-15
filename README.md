@@ -5,14 +5,15 @@
 
 技术设计文档:桌面 `Mini-Claw技术文档.md`。
 
-## 架构(Phase 3)
+## 架构
 
 ```
 WebChat(网页) ┐
-CLI(命令行)   ├─→ FastAPI 网关(认证/会话路由/SSE 流式桥接) ─→ Agent 大脑
+CLI(命令行)   ├─→ FastAPI 网关(认证/限流/会话路由/SSE 流式桥接) ─→ Agent 大脑
 Cron(报时员)  ┘        │                    (ReAct 循环 + 7 个工具 + 记忆)
                        ▼
                  PostgreSQL(会话/消息/排班表,重启不丢)
+                 Redis(限流计数,挂了降级放行)
 ```
 
 - **渠道**:网页和命令行两扇门,共用同一个网关 HTTP 接口——浏览器聊的会话,
@@ -21,7 +22,7 @@ Cron(报时员)  ┘        │                    (ReAct 循环 + 7 个工具 +
   "主动来找你"的来源;用户正在聊时跳过不插话
 - **记忆**:每次对话前召回相关记忆拼进 system prompt;回合结束后台提取跨会话
   事实,存 ~/.mini-claw/memory(对齐原版 OpenClaw 的文件式记忆)
-- **网关**:token 认证(X-Gateway-Token)、会话管理、SSE 流式转发
+- **网关**:token 认证(X-Gateway-Token)、Redis 限流(每 token 每分钟 30 次)、会话管理、SSE 流式转发
 - **Agent**:mini-claude 的核心循环迁移而来——模型要调工具时,后端替它执行
   (bash / read_file / write_file / edit_file / glob / grep / todo_write),
   结果回填继续思考;每步动作以事件形式流式推给前端
@@ -30,7 +31,10 @@ Cron(报时员)  ┘        │                    (ReAct 循环 + 7 个工具 +
 
 ## 启动
 
-```bash
+**Docker 一键起全环境(推荐)**:`docker compose up --build`——PostgreSQL + Redis + 应用
+三个容器,应用容器启动时自动跑数据库迁移,开箱即用。
+
+**本机裸跑**(开发时用):
 python -m venv .venv
 .venv/Scripts/python -m pip install -e ".[dev]"
 cp .env.example .env   # 填 ANTHROPIC_API_KEY / GATEWAY_TOKEN / DATABASE_URL
@@ -72,16 +76,22 @@ app/
 ├── config.py          # 配置(.env)
 ├── cli.py             # CLI 渠道:和网页共用网关,换门不换线
 ├── db.py              # SQLAlchemy 异步引擎/会话工厂
-├── models.py          # ORM:sessions、messages
+├── models.py          # ORM:sessions、messages、cron_jobs
+├── rate_limit.py      # Redis 滑动窗口限流(挂了降级放行)
+├── redis_client.py    # Redis 连接封装
 ├── gateway/           # 网关:auth.py token 认证,router.py 会话接口 + SSE 桥接
-├── core/sessions.py   # 会话存储(PostgreSQL 版,接口与 Phase 1 内存版相同)
+├── core/              # 三扇门共用的心脏逻辑
+│   ├── sessions.py    # 会话存储 + 进程内锁注册表(防并发)
+│   ├── turn.py        # 一轮 Agent 完整流程:落库→跑 Agent→落库→后台提记忆
+│   └── cron.py        # 报时员:APScheduler 排班表,到点注入消息跑一轮
 └── agent/             # 大脑(从 mini-claude 迁移)
     ├── tools.py       # 工具三件套:TOOLS schema + run_* 实现 + 分发表
     ├── llm.py         # Anthropic SDK 封装(DeepSeek 兼容端点)
-    └── loop.py        # ReAct 主循环:调模型→执行工具→回填,事件回调输出
-alembic/               # 数据库迁移(0001: sessions + messages)
+    ├── loop.py        # ReAct 主循环:调模型→执行工具→回填,事件回调输出
+    └── memory.py      # 文件式记忆:~/.mini-claw/memory,召回 + 回合后提取
+alembic/               # 数据库迁移(0001: sessions + messages,0002: cron_jobs)
 static/index.html      # 聊天页:会话列表 + 打字机流式 + 工具调用轨迹展示
-tests/                 # pytest 21 例:网关/流式链路/持久化/CLI/工具与安全闸门
+tests/                 # pytest 42 例:网关/流式链路/持久化/CLI/工具与安全闸门/cron/记忆/限流
 ```
 
 ## 数据库设计
@@ -90,6 +100,7 @@ tests/                 # pytest 21 例:网关/流式链路/持久化/CLI/工具�
 |---|---|---|
 | sessions | 会话本体 | id、title、llm_messages(JSONB,喂给模型的原始对话)、created_at |
 | messages | 展示消息 | session_id、role、payload(JSONB,user 文本/assistant 步骤列表)、meta(模型/token/耗时) |
+| cron_jobs | 排班表 | session_id、prompt、schedule(cron 表达式)、enabled、last_run_at |
 
 两份数据各存各的互不翻译:llm_messages 给模型看,payload 给人看。
 
@@ -98,8 +109,8 @@ tests/                 # pytest 21 例:网关/流式链路/持久化/CLI/工具�
 | 简化 | 说明 | 升级路径 |
 |---|---|---|
 | 固定 token 认证 | 单用户够用 | 多用户时上 JWT(ai-chat-backend 有现成写法) |
-| 权限闸门只留硬拒绝表 | web 场景无交互确认,危险命令默认拒绝 | Phase 3 做工具权限配置 + 审批流 |
-| 客户端断连后 Agent 线程继续跑完 | 结果照常进会话,只是没人收事件 | Phase 3 任务队列统一治理 |
+| 权限闸门只留硬拒绝表 | web 场景无交互确认,危险命令默认拒绝 | 待做:工具权限配置 + 审批流 |
+| 客户端断连后 Agent 线程继续跑完 | 结果照常进会话,只是没人收事件 | 待做:任务队列统一治理 |
 | 同步 Agent 跑在线程池 | to_thread + Queue 桥接,代码少 | 并发上来再改 AsyncAnthropic |
 | 会话锁是进程内注册表 | 单进程网关够用 | 多进程部署换分布式锁 |
 | 测试直接建表不跑迁移 | drop_all/create_all 更快 | 表结构变化时与迁移文件对齐即可 |
@@ -140,12 +151,13 @@ tests/                 # pytest 21 例:网关/流式链路/持久化/CLI/工具�
 | 3 | 记忆提取 | 模型筛出的候选全部落盘 | prompt 加 scope 字段约束 + harness 校验:"本次会话/当前任务"类一次性信息拒绝存储 | 只存跨会话事实(测试 `test_extract_stores_persistent_only` 锁定该行为),记事本不再被垃圾填满 |
 | 4 | Windows 平台 | 无平台提示,模型在 Windows 上用 bash 语法写命令 | SYSTEM 里按 `os.name == "nt"` 条件注入"bash 工具跑 cmd.exe,用 Windows 命令语法" | 模型改用 `dir`/`%USERPROFILE%` 等 Windows 写法,命令失败率明显下降(mini-claude 时期验证) |
 
-## 下一步(Phase 4)
+## 里程碑
 
-1. Docker Compose 一条命令起全环境(PostgreSQL + Redis)
-2. Redis:任务状态、限流(等服务容器化后一起做)
-3. GitHub Actions CI:ruff lint + pytest
-4. README Prompt 工程章节(计划硬性要求:Prompt 结构说明 + 至少 3 个修改前后对比)
+- **Phase 1**:FastAPI 网关 + 内存会话 + Agent 大脑(3 工具)+ SSE 流式桥接 + 静态聊天页
+- **Phase 2**:PostgreSQL 落库 + CLI 渠道(换门不换线,重启不丢)
+- **Phase 3**:工具扩充到 7 个 + 记忆系统 + Cron 报时员
+- **Phase 4**:Redis 限流 + Docker Compose 一键起环境 + GitHub Actions CI
+  + README Prompt 工程章节
 
 **RabbitMQ 结论**:个人助手没有真正的后台任务积压(Agent 跑在请求线程,cron 跑在
 报时员),引入消息队列属于为用而用——计划已在项目 4(ai-chat-backend)练过 RabbitMQ,

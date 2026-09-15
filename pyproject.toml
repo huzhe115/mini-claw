@@ -7,7 +7,7 @@ packages = ["app"]
 
 [project]
 name = "mini-claw"
-version = "0.1.0"
+version = "0.4.0"
 description = "从 0 到 1 复刻 OpenClaw 的常驻私人 AI 助手(FastAPI 网关 + Agent 大脑)"
 requires-python = ">=3.12"
 dependencies = [

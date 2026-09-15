@@ -23,7 +23,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title="Mini-Claw",
-    version="0.3.0",
+    version="0.4.0",
     description="从 0 到 1 复刻 OpenClaw — 常驻私人 AI 助手",
     lifespan=lifespan,
 )
