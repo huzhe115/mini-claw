@@ -34,28 +34,28 @@ Cron(报时员)  ┘        │                    (ReAct 循环 + 7 个工具 +
 **Docker 一键起全环境(推荐)**:`docker compose up --build`——PostgreSQL + Redis + 应用
 三个容器,应用容器启动时自动跑数据库迁移,开箱即用。
 
-**本机裸跑**(开发时用):
+**本机裸跑**(开发时用,Windows cmd 终端):
+```cmd
 python -m venv .venv
-.venv/Scripts/python -m pip install -e ".[dev]"
-cp .env.example .env   # 填 ANTHROPIC_API_KEY / GATEWAY_TOKEN / DATABASE_URL
+.venv\Scripts\activate
+pip install -e ".[dev]"
+copy .env.example .env   & REM 记事本打开 .env,填 ANTHROPIC_API_KEY 和 GATEWAY_TOKEN
 
-# 数据库(本机 PostgreSQL):建库 + 迁移
-.venv/Scripts/python -m alembic upgrade head
+REM 数据库(本机 PostgreSQL):第一次要先建库,之后只需要迁移
+psql -U postgres -c "CREATE DATABASE mini_claw"
+python -m alembic upgrade head
 
-.venv/Scripts/python -m uvicorn app.main:app --reload --port 8000
+python -m uvicorn app.main:app --reload --port 8000
 ```
 
 - 网页:http://localhost:8000/ ,左下角填 `GATEWAY_TOKEN`
 - 命令行(第二扇门):`.venv/Scripts/python -m app.cli`
   - 直接回车继续上次会话;`--new` 新建;`--list` 手动选;`--session <id>` 指定
-- 定时任务(报时员),创建后到点自动在会话里出现:
-  ```bash
-  curl -X POST http://localhost:8000/api/cron \
-    -H "X-Gateway-Token: <你的 token>" -H "Content-Type: application/json" \
-    -d '{"session_id": "<会话 id>", "prompt": "每天早上 8 点给用户发天气预报",
-         "schedule": "0 8 * * *"}'
-  # 立即触发一次验证效果:POST /api/cron/<job_id>/run
+- 定时任务(报时员),创建后到点自动在会话里出现(cmd 单行):
   ```
+  curl -X POST http://localhost:8000/api/cron -H "X-Gateway-Token: <你的 token>" -H "Content-Type: application/json" -d "{\"session_id\": \"<会话 id>\", \"prompt\": \"每天早上 8 点给用户发天气预报\", \"schedule\": \"0 8 * * *\"}"
+  ```
+  立即触发一次验证效果:POST /api/cron/<job_id>/run
 - API 文档:http://localhost:8000/docs
 
 ## 测试
