@@ -5,6 +5,8 @@ from pathlib import Path
 
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+logger = logging.getLogger(__name__)
+
 
 class Settings(BaseSettings):
     """所有配置从环境变量 / .env 读取。"""
@@ -55,7 +57,7 @@ settings = Settings()
 if not settings.gateway_token or settings.gateway_token == "dev-token":
     settings.gateway_token = _bootstrap_gateway_token()
     # 用 logging 不用 print:print 到重定向输出会被缓冲,启动日志里看不到
-    logging.warning(
+    logger.warning(
         "\n[mini-claw] 没找到 GATEWAY_TOKEN,已自动生成并写入 .env:\n\n  %s\n\n"
         "网页左下角填这串;想换钥匙改 .env 重启即可。\n",
         settings.gateway_token)
