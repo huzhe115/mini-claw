@@ -158,7 +158,7 @@ async function loadSessions(selectId) {
     const li = document.createElement('li');
     li.textContent = s.title;
     li.dataset.id = s.id;
-    if (s.id === (selectId || currentSession?.id)) li.classList.add('active');
+    if (s.id === (selectId || currentSession)) li.classList.add('active');
     li.onclick = () => selectSession(s.id);
     ul.append(li);
   }
@@ -212,7 +212,7 @@ function handleEvent(ev, live) {
 }
 
 async function sendMessage(text) {
-  const res = await api(`/api/sessions/${currentSession.id}/chat/stream`, {
+  const res = await api(`/api/sessions/${currentSession}/chat/stream`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ content: text }),
