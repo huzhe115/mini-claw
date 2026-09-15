@@ -56,6 +56,10 @@ TOOLS = [
                                                                         "status": {"type": "string", "enum": ["pending", "in_progress", "completed"]}},
                                                          "required": ["content", "status"]}}},
                       "required": ["todos"]}},
+    {"name": "wait", "description": "Wait N seconds before continuing. Use it when the user asks for a delayed answer or a timer — actually wait, do not pretend to wait.",
+     "input_schema": {"type": "object",
+                      "properties": {"seconds": {"type": "integer", "minimum": 1, "maximum": 300}},
+                      "required": ["seconds"]}},
 ]
 
 # ---------- 文件工具 ----------
@@ -229,6 +233,16 @@ def run_todo_write(todos) -> str:
         return f"Error: {e}"
 
 
+# ---------- wait:真等待,不许装 ----------
+# 阻塞当前回合(会话锁会一直拿着,期间别的消息 409),前端转圈正好覆盖这段空白。
+# ponytail: 上限 300 秒;更长的"等到某个时刻"该用报时员(见 cron),不是这里。
+def run_wait(seconds: int) -> str:
+    import time
+    n = min(max(int(seconds), 1), 300)
+    time.sleep(n)
+    return f"Waited {n} seconds"
+
+
 # ---------- 分发表:工具名 → 处理函数 ----------
 TOOL_HANDLERS = {
     "bash": run_bash,
@@ -238,4 +252,5 @@ TOOL_HANDLERS = {
     "glob": run_glob,
     "grep": run_grep,
     "todo_write": run_todo_write,
+    "wait": run_wait,
 }

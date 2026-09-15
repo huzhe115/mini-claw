@@ -8,6 +8,7 @@ from app.agent.tools import (
     run_grep,
     run_read,
     run_todo_write,
+    run_wait,
     run_write,
 )
 
@@ -74,3 +75,13 @@ def test_todo_write_validate_and_render():
         {"content": "b", "status": "in_progress"},
     ])
     TODO.items = []  # 还原,避免影响其他测试
+
+
+def test_wait_really_sleeps_clamped(monkeypatch):
+    slept = []
+    monkeypatch.setattr("time.sleep", lambda s: slept.append(s))
+    assert run_wait(2) == "Waited 2 seconds"
+    assert slept == [2]
+    # 超上限钳制到 300,防模型让服务睡一天
+    assert run_wait(99999) == "Waited 300 seconds"
+    assert slept == [2, 300]
