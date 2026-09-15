@@ -39,7 +39,7 @@ Cron(报时员)  ┘        │                    (ReAct 循环 + 7 个工具 +
 python -m venv .venv
 .venv\Scripts\activate
 pip install -e ".[dev]"
-copy .env.example .env   & REM 记事本打开 .env,填 ANTHROPIC_API_KEY 和 GATEWAY_TOKEN
+copy .env.example .env   & REM 记事本打开 .env,填 ANTHROPIC_API_KEY;GATEWAY_TOKEN 留空则启动时自动生成
 
 REM 数据库(本机 PostgreSQL):第一次要先建库,之后只需要迁移
 psql -U postgres -c "CREATE DATABASE mini_claw"
