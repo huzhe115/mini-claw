@@ -41,6 +41,12 @@
   .msg.error { align-self: flex-start; background: #fdecea; border: 1px solid #f5c6c0; color: #b42318; }
   .msg.cron { align-self: center; background: #fff8e1; border: 1px dashed #e6c56c;
               color: #8a6d1a; font-size: 12px; padding: 6px 14px; }
+  .msg.thinking { display: flex; gap: 5px; align-items: center; padding: 14px 16px; }
+  .msg.thinking span { width: 7px; height: 7px; border-radius: 50%; background: #8b90a0;
+                       animation: blink 1.2s infinite; }
+  .msg.thinking span:nth-child(2) { animation-delay: .2s; }
+  .msg.thinking span:nth-child(3) { animation-delay: .4s; }
+  @keyframes blink { 0%, 80%, 100% { opacity: .2; } 40% { opacity: 1; } }
   .msg .meta { display: block; font-size: 11px; color: #8b90a0; margin-top: 6px; }
   .assistant-box { align-self: flex-start; max-width: 72%; display: flex;
                    flex-direction: column; gap: 8px; }
@@ -178,11 +184,24 @@ async function newSession() {
   await selectSession(s.id);
 }
 
+// ---- 思考转圈:乐观 UI 的一部分,模型吐出第一个字就撤 ----
+let thinking = null;
+function showThinking() {
+  thinking = document.createElement('div');
+  thinking.className = 'msg assistant thinking';
+  thinking.innerHTML = '<span></span><span></span><span></span>';
+  messagesEl.append(thinking);
+}
+function hideThinking() {
+  if (thinking) { thinking.remove(); thinking = null; }
+}
+
 // ---- SSE:fetch 读响应流,按 "\n\n" 切帧解析 data: 行 ----
 function handleEvent(ev, live) {
   if (ev.type === 'user_msg') {
-    messagesEl.append(msgEl(ev.message.content, 'user'));
+    // 用户气泡已经在发送瞬间乐观画好,这帧只用来对齐服务端,不再画一遍
   } else if (ev.type === 'delta') {
+    hideThinking();
     if (!live.box) {
       live.box = document.createElement('div');
       live.box.className = 'assistant-box';
@@ -194,6 +213,7 @@ function handleEvent(ev, live) {
     }
     live.textEl.textContent += ev.text;  // 打字机
   } else if (ev.type === 'tool') {
+    hideThinking();
     if (!live.box) { live.box = document.createElement('div'); live.box.className = 'assistant-box'; messagesEl.append(live.box); }
     live.toolEl = toolEl(ev.name, ev.input, '');
     live.box.append(live.toolEl);
@@ -201,11 +221,13 @@ function handleEvent(ev, live) {
   } else if (ev.type === 'tool_result') {
     if (live.toolEl) live.toolEl.querySelector('pre').textContent = ev.output;
   } else if (ev.type === 'done') {
+    hideThinking();  // 极端情况:模型一个字没吐就结束
     const meta = document.createElement('span');
     meta.className = 'meta';
     if (ev.usage) meta.textContent = `tokens: ${ev.usage.input_tokens} in / ${ev.usage.output_tokens} out`;
     (live.textEl || live.box)?.append(meta);
   } else if (ev.type === 'error') {
+    hideThinking();
     messagesEl.append(msgEl('出错了: ' + ev.detail, 'error'));
   }
   scrollBottom();
@@ -250,10 +272,15 @@ $('#composer').addEventListener('submit', async (e) => {
   streaming = true;
   $('#send').disabled = true;
   input.value = '';
+  // 乐观 UI:气泡和转圈立刻上屏,不等服务端任何回包,发送观感 = 秒发
+  messagesEl.append(msgEl(text, 'user'));
+  showThinking();
+  scrollBottom();
   try {
     await sendMessage(text);
     await loadSessions();  // 标题可能已更新
   } catch (err) {
+    hideThinking();
     if (err.message.includes('处理上一条')) alert('该会话正在处理上一条消息,请稍候再发');
     else messagesEl.append(msgEl('出错了: ' + err.message, 'error'));
   } finally {
