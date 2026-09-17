@@ -1,18 +1,21 @@
 """一轮 Agent 的完整流程 — chat 和 cron 两个调用方共用。
 
-调用方负责:取会话、判断并持有会话锁(chat 拿不到锁报 409,cron 拿不到锁跳过)。
+调用方负责:取会话、判断并持有会话锁(chat 排队等锁、超时报 409,cron 拿不到锁跳过)。
 本函数在已加锁的会话里做:
   用户消息落库(role 区分来源:user / cron)→ 跑 Agent → 助手消息落库(带 meta)
   → 后台提取跨会话记忆。
 返回 {"steps", "usage", "meta"} 或 {"error": 原因}。
 """
+
 import asyncio
+import contextvars
 import time
 
 from app.agent.loop import SYSTEM, agent_loop
 from app.agent.memory import MEMORY, memory_section
 from app.config import settings
-from app.core.sessions import Session, store
+from app.core import sessions as sessions_mod
+from app.core.sessions import Session, session_ctx, store
 
 
 def _auto_title(session: Session, content: str) -> None:
@@ -28,11 +31,17 @@ def _run_agent_sync(messages: list, content: str, sink) -> Exception | None:
     进入主循环前先召回相关记忆拼进 system prompt(记事本查一遍再干活)。
     结束哨兵 None 必须由本函数发出(无论成败)——消费端靠它知道"流结束了"。
     """
+    from datetime import datetime
+
     try:
-        system = SYSTEM
+        # 报时:模型不知道"现在几点",没法把"5点16叫我"转成准确的 24h 时刻
+        system = SYSTEM + (
+            f"\nCurrent local time: {datetime.now():%Y-%m-%d %H:%M %A}. "
+            "When the user names a clock time, convert it to 24h HH:MM for the wait tool."
+        )
         if settings.memory_enabled:
             recalled = MEMORY.load_relevant(content)
-            system = SYSTEM + memory_section(recalled)
+            system = system + memory_section(recalled)
         agent_loop(messages, system=system, sink=sink)
         return None
     except Exception as e:
@@ -42,14 +51,24 @@ def _run_agent_sync(messages: list, content: str, sink) -> Exception | None:
         sink(None)
 
 
-async def run_turn(db, session: Session, content: str, role: str = "user",
-                   sink=None) -> dict:
+async def run_turn(db, session: Session, content: str, role: str = "user", sink=None) -> dict:
     """在已加锁的会话里跑一轮 Agent。
 
     sink: 收到 Agent 的全部事件,包括结束哨兵 None——外层消费者靠它知道流结束了。
     传 None 表示不外发。
     """
     emit = sink or (lambda ev: None)
+    # 工具层(如 wait 注册提醒)需要知道当前会话;Agent 线程靠 ctx.run 继承同一份。
+    # main_loop 让工具线程能把异步写库提交回主循环(见 tools.run_create_cron)。
+    sessions_mod.main_loop = asyncio.get_running_loop()
+    ctx_token = session_ctx.set(session.id)
+    try:
+        return await _run_turn_inner(db, session, content, role, emit)
+    finally:
+        session_ctx.reset(ctx_token)
+
+
+async def _run_turn_inner(db, session: Session, content: str, role: str, emit) -> dict:
     display = {"role": role, "content": content}
     await store.append_display(db, session, display)
     if role == "user":
@@ -70,8 +89,11 @@ async def run_turn(db, session: Session, content: str, role: str = "user",
 
     started = time.perf_counter()
     loop = asyncio.get_running_loop()
+    # ctx.run 把 session_ctx 带进 Agent 线程:工具层读得到当前会话 id
+    ctx = contextvars.copy_context()
     future = loop.run_in_executor(
-        None, _run_agent_sync, session.llm_messages, content, bridge)
+        None, ctx.run, _run_agent_sync, session.llm_messages, content, bridge
+    )
 
     # 展示步骤在这里累积(只有本协程在消费队列,单线程无锁):
     # delta 攒成 text 步,工具事件单独成步,结果挂回对应工具步
@@ -90,8 +112,7 @@ async def run_turn(db, session: Session, content: str, role: str = "user",
             if cur:
                 steps.append({"type": "text", "content": cur})
                 cur = ""
-            steps.append({"type": "tool", "name": ev["name"],
-                          "input": ev["input"], "output": ""})
+            steps.append({"type": "tool", "name": ev["name"], "input": ev["input"], "output": ""})
         elif kind == "tool_result":
             # 倒序找最近一个还没结果的工具步挂上去
             for st in reversed(steps):
@@ -124,5 +145,6 @@ async def run_turn(db, session: Session, content: str, role: str = "user",
     # 回合结束后后台提取跨会话记忆:不阻塞流,提取失败只记日志
     if settings.memory_enabled:
         asyncio.get_running_loop().create_task(
-            asyncio.to_thread(MEMORY.extract, list(session.llm_messages)))
+            asyncio.to_thread(MEMORY.extract, list(session.llm_messages))
+        )
     return {"steps": steps, "usage": usage, "meta": meta}

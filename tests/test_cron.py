@@ -1,4 +1,5 @@
 """排班表(cron):CRUD、表达式校验、报时员敲门、忙时跳过。"""
+
 import pytest
 from fakes import FakeLLM, text_block, usage
 
@@ -22,24 +23,30 @@ async def test_cron_crud_and_bad_schedule(client, auth_headers):
     sid = await _new_session(client, auth_headers)
 
     # 非法 cron 表达式 → 400
-    resp = await client.post("/api/cron", headers=auth_headers,
-                             json={"session_id": sid, "prompt": "p",
-                                   "schedule": "not a cron"})
+    resp = await client.post(
+        "/api/cron",
+        headers=auth_headers,
+        json={"session_id": sid, "prompt": "p", "schedule": "not a cron"},
+    )
     assert resp.status_code == 400
 
     # 正常创建
-    resp = await client.post("/api/cron", headers=auth_headers,
-                             json={"session_id": sid, "prompt": "每天早上 8 点发天气",
-                                   "schedule": "0 8 * * *"})
+    resp = await client.post(
+        "/api/cron",
+        headers=auth_headers,
+        json={"session_id": sid, "prompt": "每天早上 8 点发天气", "schedule": "0 8 * * *"},
+    )
     assert resp.status_code == 201
     job = resp.json()
     assert job["prompt"] == "每天早上 8 点发天气"
     assert job["enabled"] is True
 
     # 目标会话不存在 → 404
-    resp = await client.post("/api/cron", headers=auth_headers,
-                             json={"session_id": "nope", "prompt": "p",
-                                   "schedule": "0 8 * * *"})
+    resp = await client.post(
+        "/api/cron",
+        headers=auth_headers,
+        json={"session_id": "nope", "prompt": "p", "schedule": "0 8 * * *"},
+    )
     assert resp.status_code == 404
 
     # 列表 + 删除
@@ -53,15 +60,19 @@ async def test_cron_crud_and_bad_schedule(client, auth_headers):
 
 async def test_fire_cron_runs_agent(client, auth_headers, fake_llm, db_session):
     """报时员敲门:以 cron 角色注入消息,Agent 跑一轮,结果留在会话里。"""
-    fake_llm.script.append({
-        "chunks": ["早上好,今天多云"],
-        "blocks": [text_block("早上好,今天多云")],
-        "usage": usage(5, 3),
-    })
+    fake_llm.script.append(
+        {
+            "chunks": ["早上好,今天多云"],
+            "blocks": [text_block("早上好,今天多云")],
+            "usage": usage(5, 3),
+        }
+    )
     sid = await _new_session(client, auth_headers)
-    resp = await client.post("/api/cron", headers=auth_headers,
-                             json={"session_id": sid, "prompt": "给用户发早安",
-                                   "schedule": "0 8 * * *"})
+    resp = await client.post(
+        "/api/cron",
+        headers=auth_headers,
+        json={"session_id": sid, "prompt": "给用户发早安", "schedule": "0 8 * * *"},
+    )
     job_id = resp.json()["id"]
 
     resp = await client.post(f"/api/cron/{job_id}/run", headers=auth_headers)
@@ -78,9 +89,11 @@ async def test_fire_cron_runs_agent(client, auth_headers, fake_llm, db_session):
 async def test_fire_cron_skips_busy_session(client, auth_headers, db_session):
     """用户正在聊时,报时员不插话。"""
     sid = await _new_session(client, auth_headers)
-    resp = await client.post("/api/cron", headers=auth_headers,
-                             json={"session_id": sid, "prompt": "发早安",
-                                   "schedule": "0 8 * * *"})
+    resp = await client.post(
+        "/api/cron",
+        headers=auth_headers,
+        json={"session_id": sid, "prompt": "发早安", "schedule": "0 8 * * *"},
+    )
     job_id = resp.json()["id"]
 
     session = await store.get(db_session, sid)
@@ -93,3 +106,106 @@ async def test_fire_cron_skips_busy_session(client, auth_headers, db_session):
 async def test_fire_cron_missing_job(client, auth_headers):
     resp = await client.post("/api/cron/999/run", headers=auth_headers)
     assert resp.json() == {"skipped": "job missing or disabled"}
+
+
+async def test_reminders_queue(client, auth_headers, monkeypatch):
+    """wait 工具注册的一次性提醒:进队列、列表可见、带剩余秒数。"""
+    from apscheduler.schedulers.asyncio import AsyncIOScheduler
+
+    from app.core.cron import REMINDERS, list_reminders, schedule_reminder
+
+    REMINDERS.clear()
+    # 测试环境 scheduler 是 None;换成不启动的真调度器(只 add_job 不触发)
+    monkeypatch.setattr("app.core.cron.scheduler", AsyncIOScheduler())
+    rid = schedule_reminder("sess-abc", "喝水", 30)
+    assert rid is not None
+
+    items = list_reminders()
+    assert len(items) == 1
+    assert items[0]["message"] == "喝水"
+    assert 0 <= items[0]["left"] <= 30
+
+    # API 也能看到
+    resp = await client.get("/api/reminders", headers=auth_headers)
+    assert resp.status_code == 200
+    assert resp.json()[0]["message"] == "喝水"
+
+
+def test_reminders_scheduler_unavailable(monkeypatch):
+    """没有调度器(测试环境默认):注册返回 None,wait 工具会退化真等待。"""
+    from app.core.cron import schedule_reminder
+
+    monkeypatch.setattr("app.core.cron.scheduler", None)
+    assert schedule_reminder("sess-abc", "喝水", 30) is None
+
+
+async def test_model_creates_cron_via_tool(client, auth_headers, db_session, fake_llm):
+    """模型用 create_cron 工具给自己排班(如'每天下午3点告诉我股票行情')。"""
+    from fakes import tool_use_block
+    from sqlalchemy import select
+
+    fake_llm.script.append(
+        {
+            "chunks": [],
+            "blocks": [
+                tool_use_block(
+                    "create_cron", {"schedule": "0 15 * * *", "prompt": "查股票行情告诉用户"}
+                )
+            ],
+        }
+    )
+    fake_llm.script.append(
+        {
+            "chunks": ["已安排"],
+            "blocks": [text_block("已安排")],
+            "usage": usage(3, 2),
+        }
+    )
+    sid = await _new_session(client, auth_headers)
+
+    resp = await client.post(
+        f"/api/sessions/{sid}/chat/stream",
+        headers=auth_headers,
+        json={"content": "每天下午3点告诉我股票行情"},
+    )
+    assert resp.status_code == 200
+
+    # 任务已落库,挂在本会话下
+    jobs = (await db_session.scalars(select(CronJobModel))).all()
+    assert len(jobs) == 1
+    assert jobs[0].schedule == "0 15 * * *"
+    assert jobs[0].prompt == "查股票行情告诉用户"
+    assert jobs[0].session_id == sid
+
+
+async def test_model_cron_bad_expression(client, auth_headers, db_session, fake_llm):
+    """模型写的 cron 表达式非法:工具返回错误,不落库。"""
+    from fakes import tool_use_block
+    from sqlalchemy import select
+
+    fake_llm.script.append(
+        {
+            "chunks": [],
+            "blocks": [
+                tool_use_block("create_cron", {"schedule": "every day 3pm", "prompt": "提醒"})
+            ],
+        }
+    )
+    fake_llm.script.append(
+        {
+            "chunks": [],
+            "blocks": [text_block("表达式错了,我会改")],
+            "usage": usage(3, 2),
+        }
+    )
+    sid = await _new_session(client, auth_headers)
+
+    resp = await client.post(
+        f"/api/sessions/{sid}/chat/stream",
+        headers=auth_headers,
+        json={"content": "每天下午3点提醒我"},
+    )
+    assert resp.status_code == 200
+    # 表达式非法:任务没落库,错误信息喂回给模型
+    jobs = (await db_session.scalars(select(CronJobModel))).all()
+    assert jobs == []

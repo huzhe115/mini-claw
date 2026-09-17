@@ -37,7 +37,8 @@ line-length = 100
 [tool.ruff.lint]
 # B008: FastAPI 依赖注入的标准写法就是 Depends() 放参数默认值,官方文档如此
 # BLE001: 工具/LLM 等外部边界的失败必须宽捕获并降级为错误消息,这里宽捕获是刻意的
-ignore = ["B008", "BLE001"]
+# DTZ001/DTZ005: datetime.now() 取的是用户本地墙上时间(报时、算提醒差值),naive 是语义要求
+ignore = ["B008", "BLE001", "DTZ001", "DTZ005"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "auto"

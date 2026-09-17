@@ -30,6 +30,20 @@
                       background: #6c8cff; color: #fff; cursor: pointer; font-size: 12px; }
   .token-box .hint { color: #8b90a0; margin-bottom: 6px; }
 
+  /* ---- 定时任务列表(侧栏) ---- */
+  .cron-box { padding: 10px 12px; border-top: 1px solid #3a3f52; font-size: 12px;
+              max-height: 180px; display: flex; flex-direction: column; }
+  .cron-box .cron-title { color: #8b90a0; margin-bottom: 6px; font-size: 11px; }
+  #cron-list { list-style: none; overflow-y: auto; }
+  #cron-list li { display: flex; align-items: center; gap: 6px; padding: 4px 0;
+                  color: #cfd3dc; }
+  #cron-list li .job { flex: 1; min-width: 0; white-space: nowrap; overflow: hidden;
+                       text-overflow: ellipsis; }
+  #cron-list li button { border: none; background: none; color: #8b90a0;
+                         cursor: pointer; font-size: 14px; padding: 0 4px; }
+  #cron-list li button:hover { color: #f0616d; }
+  #cron-list li.empty { color: #666b7a; }
+
   /* ---- 聊天区 ---- */
   main { flex: 1; display: flex; flex-direction: column; min-width: 0; }
   #messages { flex: 1; overflow-y: auto; padding: 24px; display: flex;
@@ -66,6 +80,13 @@
   button#send { width: 88px; border: none; border-radius: 10px; background: #6c8cff;
                 color: #fff; font-size: 14px; cursor: pointer; }
   button#send:disabled { background: #b9c2f5; cursor: not-allowed; }
+
+  /* ---- 左上角等待队列:排队横幅 + 一次性提醒任务 ---- */
+  #corner { position: fixed; top: 12px; left: 272px; z-index: 10; display: none;
+            max-width: 60%; background: #fff8e1; border: 1px dashed #e6c56c;
+            color: #8a6d1a; padding: 9px 14px; border-radius: 8px; font-size: 13px; }
+  #corner .corner-item { padding: 3px 0; }
+  #corner .corner-item + .corner-item { border-top: 1px dashed #e6c56c; }
 </style>
 </head>
 <body>
@@ -73,12 +94,17 @@
   <div class="brand">🦀 Mini-Claw<small>常驻私人 AI 助手 · v0.4</small></div>
   <button id="new-session">＋ 新会话</button>
   <ul id="sessions"></ul>
+  <div class="cron-box">
+    <div class="cron-title">⏰ 定时任务</div>
+    <ul id="cron-list"><li class="empty">加载中…</li></ul>
+  </div>
   <div class="token-box">
     <div class="hint">Gateway Token(值在 .env 的 GATEWAY_TOKEN;没配过启动日志里会亮出来)</div>
     <input id="token" type="password" placeholder="X-Gateway-Token">
     <button id="save-token">保存 Token</button>
   </div>
 </aside>
+<div id="corner"></div>
 <main>
   <div id="messages"></div>
   <form id="composer">
@@ -136,7 +162,7 @@ function renderMessage(m) {
     messagesEl.append(msgEl(m.content, 'user'));
     return;
   }
-  if (m.role === 'cron') {
+  if (m.role === 'cron' || m.role === 'reminder') {
     messagesEl.append(msgEl('⏰ 定时任务: ' + m.content, 'cron'));
     return;
   }
@@ -168,6 +194,34 @@ async function loadSessions(selectId) {
     li.onclick = () => selectSession(s.id);
     ul.append(li);
   }
+  loadCronJobs().catch(() => {});  // 顺带刷新定时任务列表
+}
+
+async function loadCronJobs() {
+  const res = await api('/api/cron');
+  const jobs = await res.json();
+  const ul = $('#cron-list');
+  ul.innerHTML = '';
+  if (!jobs.length) {
+    ul.innerHTML = '<li class="empty">没有定时任务</li>';
+    return;
+  }
+  for (const j of jobs) {
+    const li = document.createElement('li');
+    const span = document.createElement('span');
+    span.className = 'job';
+    span.textContent = `${j.schedule} · ${j.prompt}`;
+    span.title = `schedule: ${j.schedule}\nprompt: ${j.prompt}`;
+    const del = document.createElement('button');
+    del.textContent = '×';
+    del.title = '删除任务';
+    del.onclick = async () => {
+      await api(`/api/cron/${j.id}`, { method: 'DELETE' });
+      loadCronJobs();
+    };
+    li.append(span, del);
+    ul.append(li);
+  }
 }
 
 async function selectSession(id) {
@@ -196,8 +250,60 @@ function hideThinking() {
   if (thinking) { thinking.remove(); thinking = null; }
 }
 
+// ---- 左上角等待队列:排队横幅 + 一次性提醒任务,共用这个框 ----
+const corner = { queued: null, reminders: [] };
+let lastReminderCount = 0;
+
+function renderCorner() {
+  const el = $('#corner');
+  const parts = [];
+  if (corner.queued) {
+    parts.push(`<div class="corner-item">⏳ 排队中:「${corner.queued.task}」` +
+               `会话正忙,最多再等 ${corner.queued.left}s,完成后自动继续</div>`);
+  }
+  for (const r of corner.reminders) {
+    parts.push(`<div class="corner-item">⏰ 提醒:「${r.message}」还剩 ${r.left}s</div>`);
+  }
+  if (!parts.length) { el.style.display = 'none'; el.innerHTML = ''; return; }
+  el.innerHTML = parts.join('');
+  el.style.display = 'block';
+}
+
+function cornerTick() {  // 每秒走一格倒计时
+  if (corner.queued) corner.queued.left = Math.max(0, corner.queued.left - 1);
+  for (const r of corner.reminders) r.left = Math.max(0, r.left - 1);
+  renderCorner();
+}
+
+async function pollReminders() {  // 每 2 秒拉一次等待队列
+  if (!token) return;
+  try {
+    const res = await api('/api/reminders');
+    corner.reminders = await res.json();
+    // 有任务刚触发(列表从有变无)且不在流式接收中:刷新历史,让提醒消息上屏
+    if (lastReminderCount > 0 && !corner.reminders.length && !streaming) {
+      await loadSessions();
+      if (currentSession) await selectSession(currentSession);
+    }
+    lastReminderCount = corner.reminders.length;
+    renderCorner();
+  } catch (e) { /* 轮询失败静默,下个周期再试 */ }
+}
+setInterval(cornerTick, 1000);
+setInterval(pollReminders, 2000);
+pollReminders();
+
 // ---- SSE:fetch 读响应流,按 "\n\n" 切帧解析 data: 行 ----
 function handleEvent(ev, live) {
+  if (ev.type === 'queued') {
+    corner.queued = { task: ev.task, left: ev.wait };
+    renderCorner();
+    // 排队不是"处理中":放开发送键,倒计时期间还能继续发消息(下一条也排队)
+    streaming = false;
+    $('#send').disabled = false;
+    return;
+  }
+  corner.queued = null;
   if (ev.type === 'user_msg') {
     // 用户气泡已经在发送瞬间乐观画好,这帧只用来对齐服务端,不再画一遍
   } else if (ev.type === 'delta') {
@@ -286,6 +392,8 @@ $('#composer').addEventListener('submit', async (e) => {
   } finally {
     streaming = false;
     $('#send').disabled = false;
+    corner.queued = null;
+    renderCorner();
     scrollBottom();
   }
 });

@@ -9,6 +9,7 @@
   python -m app.cli --list     列出会话手动选
   python -m app.cli --session <id>  进指定会话
 """
+
 import argparse
 import json
 import sys
@@ -87,7 +88,8 @@ class ClawCLI:
 
     def stream_chat(self, session_id: str, content: str) -> None:
         with self.client.stream(
-            "POST", f"/api/sessions/{session_id}/chat/stream",
+            "POST",
+            f"/api/sessions/{session_id}/chat/stream",
             json={"content": content},
         ) as resp:
             if resp.status_code != 200:
@@ -112,8 +114,10 @@ class ClawCLI:
         elif kind == "done":
             usage = ev.get("usage") or {}
             meta = ev.get("meta") or {}
-            print(f"\n{GRAY}[tokens {usage.get('input_tokens')}/{usage.get('output_tokens')}"
-                  f" · {meta.get('duration_ms')}ms]{RESET}")
+            print(
+                f"\n{GRAY}[tokens {usage.get('input_tokens')}/{usage.get('output_tokens')}"
+                f" · {meta.get('duration_ms')}ms]{RESET}"
+            )
         elif kind == "error":
             print(f"\n{RED}[error] {ev['detail']}{RESET}", flush=True)
 
@@ -147,7 +151,8 @@ def _resolve_session(cli: ClawCLI, args) -> str:
 
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
-        description="mini-claw CLI 渠道 — 和网页共用同一个网关,换门不换线")
+        description="mini-claw CLI 渠道 — 和网页共用同一个网关,换门不换线"
+    )
     parser.add_argument("--session", help="指定会话 id")
     parser.add_argument("--new", action="store_true", help="新建会话")
     parser.add_argument("--list", action="store_true", help="列出会话手动选择")

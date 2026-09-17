@@ -2,6 +2,7 @@
 
 Redis 挂了降级放行;rate_limit_per_minute <= 0 关闭限流。
 """
+
 import hashlib
 
 from app.config import settings

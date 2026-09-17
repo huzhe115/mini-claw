@@ -5,6 +5,7 @@
 用法:fake.script 里放每次 stream 调用的预设回复,调用时 pop 一个。
   {"chunks": ["你好"], "blocks": [块...], "usage": {...}, "error": 异常}
 """
+
 from types import SimpleNamespace
 
 from anthropic.types import TextBlock, ToolUseBlock, Usage
@@ -51,5 +52,6 @@ class FakeLLM:
         # 留引用的话断言时看到的是"后来"的状态
         self.calls.append({"messages": list(messages), "system": system, "tools": tools})
         item = self.script.pop(0)
-        return FakeStream(item.get("chunks", []), item["blocks"],
-                          item.get("usage"), item.get("error"))
+        return FakeStream(
+            item.get("chunks", []), item["blocks"], item.get("usage"), item.get("error")
+        )

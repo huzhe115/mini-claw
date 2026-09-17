@@ -4,6 +4,7 @@ Phase 1 只接 DeepSeek 的 Anthropic 兼容端点(和 mini-claude 相同,已验
 Phase 3 做供应商抽象:原版 OpenClaw 支持多模型路由/故障转移,
 到时候这里改成按配置选择 provider,上层循环不用动。
 """
+
 from anthropic import Anthropic
 
 from app.config import settings

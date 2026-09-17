@@ -9,7 +9,9 @@ Phase 1 是内存 dict,重启即失;Phase 2 落库:
 一个注意点:get 每次从库里新造 Session 对象,所以会话锁必须放在
 进程级注册表里按 id 共享,否则两个并发请求各拿各的锁,锁就失效了。
 """
+
 import asyncio
+import contextvars
 import json
 import uuid
 
@@ -33,6 +35,15 @@ def _dump_llm_messages(messages: list) -> list:
 
 # 会话锁注册表:id → asyncio.Lock。单进程网关够用,多进程部署时换分布式锁
 _locks: dict[str, asyncio.Lock] = {}
+
+# ---------- 跨线程会话上下文(工具在 Agent 线程里跑,靠它们找到回家的路) ----------
+# 当前回合的会话 id,由 run_turn 设置。工具层(如 wait 注册提醒任务)靠它知道
+# "这条提醒属于哪个会话"。Agent 线程通过 copy_context 继承同一份上下文。
+session_ctx: contextvars.ContextVar[str] = contextvars.ContextVar("session_id", default="")
+
+# 主事件循环引用,由 run_turn 设置。工具的异步写库(如 create_cron 落库)
+# 要通过 run_coroutine_threadsafe 提交回主循环执行。
+main_loop: asyncio.AbstractEventLoop | None = None
 
 
 def session_lock(session_id: str) -> asyncio.Lock:
@@ -67,18 +78,21 @@ class SessionStore:
         row = await db.get(SessionModel, session_id)
         if row is None:
             return None
-        messages = (await db.scalars(
-            select(MessageModel)
-            .where(MessageModel.session_id == session_id)
-            .order_by(MessageModel.id)
-        )).all()
-        return Session(row.id, row.title, row.created_at,
-                       row.llm_messages or [], [m.payload for m in messages])
+        messages = (
+            await db.scalars(
+                select(MessageModel)
+                .where(MessageModel.session_id == session_id)
+                .order_by(MessageModel.id)
+            )
+        ).all()
+        return Session(
+            row.id, row.title, row.created_at, row.llm_messages or [], [m.payload for m in messages]
+        )
 
     async def list(self, db: AsyncSession) -> list[Session]:
-        rows = (await db.scalars(
-            select(SessionModel).order_by(SessionModel.created_at.desc())
-        )).all()
+        rows = (
+            await db.scalars(select(SessionModel).order_by(SessionModel.created_at.desc()))
+        ).all()
         # 列表页只要头部信息,不加载消息
         return [Session(r.id, r.title, r.created_at, [], []) for r in rows]
 
@@ -87,10 +101,10 @@ class SessionStore:
         row.title = s.title
         await db.commit()
 
-    async def append_display(self, db: AsyncSession, s: Session,
-                             entry: dict, meta: dict | None = None) -> None:
-        db.add(MessageModel(session_id=s.id, role=entry["role"],
-                            payload=entry, meta=meta))
+    async def append_display(
+        self, db: AsyncSession, s: Session, entry: dict, meta: dict | None = None
+    ) -> None:
+        db.add(MessageModel(session_id=s.id, role=entry["role"], payload=entry, meta=meta))
         await db.commit()
         s.display.append(entry)
 

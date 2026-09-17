@@ -1,4 +1,5 @@
 """限流:计数逻辑(假 Redis)与网关 429。"""
+
 import pytest
 
 from app.rate_limit import check_rate_limit
@@ -52,12 +53,15 @@ async def test_check_rate_limit_fail_open(monkeypatch):
 
 async def test_chat_stream_429(client, auth_headers, monkeypatch):
     """超限时网关直接 429,不进 Agent。"""
+
     async def blocked(token):
         return False
+
     monkeypatch.setattr("app.gateway.router.check_rate_limit", blocked)
 
     resp = await client.post("/api/sessions", headers=auth_headers)
     sid = resp.json()["id"]
-    resp = await client.post(f"/api/sessions/{sid}/chat/stream",
-                             headers=auth_headers, json={"content": "hi"})
+    resp = await client.post(
+        f"/api/sessions/{sid}/chat/stream", headers=auth_headers, json={"content": "hi"}
+    )
     assert resp.status_code == 429

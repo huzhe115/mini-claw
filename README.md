@@ -10,7 +10,7 @@
 ```
 WebChat(网页) ┐
 CLI(命令行)   ├─→ FastAPI 网关(认证/限流/会话路由/SSE 流式桥接) ─→ Agent 大脑
-Cron(报时员)  ┘        │                    (ReAct 循环 + 7 个工具 + 记忆)
+Cron(报时员)  ┘        │                    (ReAct 循环 + 8 个工具 + 记忆)
                        ▼
                  PostgreSQL(会话/消息/排班表,重启不丢)
                  Redis(限流计数,挂了降级放行)
@@ -40,6 +40,7 @@ python -m venv .venv
 .venv\Scripts\activate
 pip install -e ".[dev]"
 copy .env.example .env   & REM 记事本打开 .env,填 ANTHROPIC_API_KEY;GATEWAY_TOKEN 留空则启动时自动生成
+REM 可选:填 TAVILY_API_KEY(tavily.com 注册,免费额度)开启 web_search 联网搜索
 
 REM 数据库(本机 PostgreSQL):第一次要先建库,之后只需要迁移
 psql -U postgres -c "CREATE DATABASE mini_claw"

@@ -3,6 +3,7 @@
 Phase 4 只用它做限流计数。原则:Redis 挂了自动降级(限流失效但服务可用),
 个人助手可用性优先,和 ai-chat-backend 的降级模式一致。
 """
+
 import logging
 
 import redis.asyncio as redis

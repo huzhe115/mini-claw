@@ -26,8 +26,9 @@ TEST_DB = "mini_claw_test"
 @pytest_asyncio.fixture(scope="session", autouse=True)
 async def ensure_test_db():
     """测试库不存在就建一个(连的是管理库 postgres)。"""
-    conn = await asyncpg.connect(host="localhost", port=5432, user="postgres",
-                                 password="123456", database="postgres")
+    conn = await asyncpg.connect(
+        host="localhost", port=5432, user="postgres", password="123456", database="postgres"
+    )
     exists = await conn.fetchval("SELECT 1 FROM pg_database WHERE datname = $1", TEST_DB)
     if not exists:
         await conn.execute(f'CREATE DATABASE "{TEST_DB}"')

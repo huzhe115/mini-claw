@@ -1,4 +1,5 @@
 """token 自动生成(bootstrap)测试 — 对齐原版 OpenClaw onboarding 的钥匙生成。"""
+
 from app.config import _bootstrap_gateway_token
 
 

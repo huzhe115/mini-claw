@@ -33,6 +33,15 @@ app.include_router(gateway_router.router)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 
+# 开发期前端常改:静态页面响应标 no-cache,否则浏览器缓存旧版,改了也看不到
+@app.middleware("http")
+async def no_cache_static(request, call_next):
+    response = await call_next(request)
+    if request.url.path == "/" or request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-cache"
+    return response
+
+
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok"}

@@ -7,6 +7,7 @@
 - 权限闸门只留硬拒绝表(web 场景没有交互式确认,危险命令默认拒绝)。
 - 上下文压缩 / 记忆 / hooks / 子代理 / MCP 都在 mini-claude 里,Phase 3 按需移植。
 """
+
 import os
 import re
 import time
@@ -23,8 +24,11 @@ SYSTEM = (
     "Always reply in the language the user uses. "
     "For multi-step tasks, plan first; only call tools when you actually need them. "
     f"Your workspace is {T.WORKDIR}. "
-    + ("The bash tool runs Windows cmd.exe — use Windows command syntax. "
-       if os.name == "nt" else "")
+    + (
+        "The bash tool runs Windows cmd.exe — use Windows command syntax. "
+        if os.name == "nt"
+        else ""
+    )
 )
 
 # ---------- 权限闸门:硬拒绝表(web 场景默认拒绝,无交互确认) ----------
@@ -54,16 +58,31 @@ def call_llm(messages: list, system: str, tools: list, on_text, retries: int = 2
                 return s.get_final_message()
         except Exception as e:
             msg = str(e).lower()
-            retriable = any(k in msg for k in ("429", "529", "timeout", "connection",
-                                               "rate limit", "overloaded", "remote"))
+            retriable = any(
+                k in msg
+                for k in (
+                    "429",
+                    "529",
+                    "timeout",
+                    "connection",
+                    "rate limit",
+                    "overloaded",
+                    "remote",
+                )
+            )
             if retriable and attempt < retries:
-                time.sleep(2 ** attempt)
+                time.sleep(2**attempt)
                 continue
             raise
 
 
-def agent_loop(messages: list, system: str = SYSTEM, tools: list | None = None,
-               max_steps: int | None = None, sink=None) -> None:
+def agent_loop(
+    messages: list,
+    system: str = SYSTEM,
+    tools: list | None = None,
+    max_steps: int | None = None,
+    sink=None,
+) -> None:
     """核心循环。messages 原地追加(调用方持引用,失败回滚由调用方做)。
 
     sink 收到的事件:
@@ -89,8 +108,9 @@ def agent_loop(messages: list, system: str = SYSTEM, tools: list | None = None,
 
         response = call_llm(messages, system, tools, on_text=on_text)
         if not emitted_text:
-            full = "".join(getattr(b, "text", "") for b in response.content
-                           if getattr(b, "type", "") == "text")
+            full = "".join(
+                getattr(b, "text", "") for b in response.content if getattr(b, "type", "") == "text"
+            )
             if full:
                 emit({"type": "delta", "text": full})
         usage = getattr(response, "usage", None)  # 部分端点不回报 usage
@@ -102,8 +122,13 @@ def agent_loop(messages: list, system: str = SYSTEM, tools: list | None = None,
         tool_calls = [b for b in response.content if b.type == "tool_use"]
         if not tool_calls:
             # 模型只说话不调工具 = 任务完成
-            emit({"type": "done", "usage": {"input_tokens": total_in,
-                                            "output_tokens": total_out}, "stopped": False})
+            emit(
+                {
+                    "type": "done",
+                    "usage": {"input_tokens": total_in, "output_tokens": total_out},
+                    "stopped": False,
+                }
+            )
             return
 
         results = []
@@ -117,17 +142,26 @@ def agent_loop(messages: list, system: str = SYSTEM, tools: list | None = None,
             if output is None:
                 handler = T.TOOL_HANDLERS.get(block.name)
                 try:
-                    output = handler(**block.input) if handler else f"Error: unknown tool {block.name}"
+                    output = (
+                        handler(**block.input) if handler else f"Error: unknown tool {block.name}"
+                    )
                 except Exception as e:
                     output = f"Error: {e}"
-            output = str(output)[:T.MAX_TOOL_OUTPUT]
+            output = str(output)[: T.MAX_TOOL_OUTPUT]
             emit({"type": "tool_result", "name": block.name, "output": output})
-            results.append({
-                "type": "tool_result",
-                "tool_use_id": block.id,
-                "content": output,
-            })
+            results.append(
+                {
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": output,
+                }
+            )
         messages.append({"role": "user", "content": results})
 
-    emit({"type": "done", "usage": {"input_tokens": total_in,
-                                    "output_tokens": total_out}, "stopped": True})
+    emit(
+        {
+            "type": "done",
+            "usage": {"input_tokens": total_in, "output_tokens": total_out},
+            "stopped": True,
+        }
+    )
